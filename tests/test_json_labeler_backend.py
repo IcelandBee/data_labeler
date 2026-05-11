@@ -59,6 +59,31 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertEqual(items[1]["sample_key"], key)
         self.assertEqual(labels[key]["human_label"], "fail")
 
+    def test_build_items_turns_non_dict_records_into_actionable_items(self):
+        items, labels = server.build_items(["not a record"], {"labels": {}})
+        expected_key = server.make_sample_key({})
+
+        self.assertEqual(labels, {})
+        self.assertEqual(items[0]["index"], 0)
+        self.assertEqual(items[0]["sample_key"], expected_key)
+        self.assertIn("record", items[0]["image_errors"])
+        self.assertIn("0", items[0]["image_errors"]["record"])
+
+    def test_build_items_reports_missing_and_malformed_path_fields(self):
+        records = [
+            {"prompt": "missing required paths"},
+            {"file_name": 123, "cond_1": None, "cond_2": ["bad"]},
+        ]
+
+        items, _ = server.build_items(records, {"labels": {}})
+
+        self.assertEqual(items[0]["prompt"], "missing required paths")
+        self.assertEqual(
+            set(items[0]["image_errors"]),
+            {"file_name", "cond_1", "cond_2"},
+        )
+        self.assertTrue({"file_name", "cond_1", "cond_2"}.issubset(items[1]["image_errors"]))
+
     def test_compute_stats_counts_pass_fail_and_unlabeled_current_records_only(self):
         records = [make_record(0), make_record(1), make_record(2)]
         labels = {
@@ -73,6 +98,22 @@ class JsonLabelerBackendTests(unittest.TestCase):
             "fail": 1,
             "labeled": 2,
             "unlabeled": 1,
+        })
+
+    def test_compute_stats_counts_duplicate_current_records_per_record(self):
+        records = [make_record(0), make_record(0)]
+        labels = {
+            server.make_sample_key(records[0]): {"human_label": "pass"},
+        }
+
+        stats = server.compute_stats(records, labels)
+
+        self.assertEqual(stats, {
+            "total": 2,
+            "pass": 2,
+            "fail": 0,
+            "labeled": 2,
+            "unlabeled": 0,
         })
 
     def test_apply_label_accepts_pass_fail_and_clear(self):

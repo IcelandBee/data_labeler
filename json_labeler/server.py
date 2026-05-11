@@ -211,6 +211,9 @@ def safe_path(path_str):
     if not path_str:
         return None
 
+    if not isinstance(path_str, str):
+        path_str = str(path_str)
+
     decoded = unquote(path_str)
     decoded = decoded.replace('%5C', '\\').replace('%2F', '/')
     normalized = os.path.normpath(decoded)
@@ -237,11 +240,22 @@ def read_json_records(json_path):
     return data
 
 
+def _record_path_value(record, field):
+    if not isinstance(record, dict):
+        return ''
+    value = record.get(field, '')
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def make_sample_key(record):
     parts = [
-        str(record.get('file_name', '')),
-        str(record.get('cond_1', '')),
-        str(record.get('cond_2', '')),
+        _record_path_value(record, 'file_name'),
+        _record_path_value(record, 'cond_1'),
+        _record_path_value(record, 'cond_2'),
     ]
     return hashlib.sha1('\n'.join(parts).encode('utf-8')).hexdigest()
 
@@ -430,10 +444,11 @@ def _image_error(path_value):
 
 
 def normalize_record_for_item(record, index):
-    item = copy.deepcopy(record)
-    source_path = safe_path(record.get('cond_1', ''))
-    reference_path = safe_path(record.get('cond_2', ''))
-    target_path = safe_path(record.get('file_name', ''))
+    is_record = isinstance(record, dict)
+    item = copy.deepcopy(record) if is_record else {}
+    source_path = safe_path(_record_path_value(record, 'cond_1'))
+    reference_path = safe_path(_record_path_value(record, 'cond_2'))
+    target_path = safe_path(_record_path_value(record, 'file_name'))
     image_fields = {
         'cond_1': source_path,
         'cond_2': reference_path,
@@ -456,6 +471,9 @@ def normalize_record_for_item(record, index):
         error = _image_error(path_value)
         if error:
             item['image_errors'][field] = error
+
+    if not is_record:
+        item['image_errors']['record'] = f'Record at index {index} is not an object'
 
     return item
 
@@ -483,11 +501,11 @@ def build_items(records, sidecar):
 
 
 def compute_stats(records, labels):
-    current_keys = {make_sample_key(record) for record in records}
     passed = 0
     failed = 0
 
-    for sample_key in current_keys:
+    for record in records:
+        sample_key = make_sample_key(record)
         entry = labels.get(sample_key, {})
         human_label = entry.get('human_label') if isinstance(entry, dict) else None
         if human_label == 'pass':
