@@ -337,6 +337,44 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(list(export_dir.glob("*.tmp")), [])
             self.assertEqual(list(export_dir.glob(".*.tmp")), [])
 
+    def test_api_export_rolls_back_promoted_files_when_later_promotion_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            export_dir = Path(tmp) / "exports"
+            export_dir.mkdir()
+            records = [make_record(0), make_record(1)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            server.api_load({"input_json_path": str(input_path)})
+            originals = {
+                server.DEFAULT_ANNOTATED_FILENAME: [{"old": "annotated"}],
+                server.DEFAULT_PASS_FILENAME: [{"old": "pass"}],
+                server.DEFAULT_FAIL_FILENAME: [{"old": "fail"}],
+            }
+            for filename, payload in originals.items():
+                (export_dir / filename).write_text(json.dumps(payload), encoding="utf-8")
+
+            calls = 0
+            real_replace = os.replace
+
+            def fail_second_promotion(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("promotion failed")
+                return real_replace(src, dst)
+
+            with mock.patch("os.replace", side_effect=fail_second_promotion):
+                with self.assertRaises(OSError):
+                    server.api_export({"export_dir": str(export_dir)})
+
+            for filename, payload in originals.items():
+                restored = json.loads((export_dir / filename).read_text(encoding="utf-8"))
+                self.assertEqual(restored, payload)
+            self.assertEqual(list(export_dir.glob("*.tmp")), [])
+            self.assertEqual(list(export_dir.glob(".*.tmp")), [])
+            self.assertEqual(list(export_dir.glob("*.bak")), [])
+            self.assertEqual(list(export_dir.glob(".*.bak")), [])
+
     def test_http_handler_serves_task3_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "sample.bmp"

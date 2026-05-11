@@ -15,6 +15,7 @@ import datetime
 import hashlib
 import json
 import os
+import shutil
 import sys
 import argparse
 import signal
@@ -432,6 +433,29 @@ def stage_json_file(path, payload):
         raise
 
 
+def backup_existing_file(path):
+    if not os.path.exists(path):
+        return None
+
+    directory = os.path.dirname(path) or '.'
+    fd, backup_path = tempfile.mkstemp(
+        prefix=f'.{os.path.basename(path)}.',
+        suffix='.bak',
+        dir=directory,
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(path, backup_path)
+    except Exception:
+        if os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
+        raise
+    return backup_path
+
+
 def empty_sidecar(source_file=""):
     source_mtime = None
     if source_file and os.path.exists(source_file):
@@ -773,9 +797,10 @@ def api_export(data):
                     pass
         raise
 
+    backups = []
     try:
-        for final_path, temp_path in staged:
-            os.replace(temp_path, final_path)
+        for final_path, _ in staged:
+            backups.append((final_path, backup_existing_file(final_path)))
     except Exception:
         for _, temp_path in staged:
             if os.path.exists(temp_path):
@@ -783,7 +808,52 @@ def api_export(data):
                     os.remove(temp_path)
                 except OSError:
                     pass
+        for _, backup_path in backups:
+            if backup_path and os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                except OSError:
+                    pass
         raise
+
+    promoted = []
+    try:
+        for final_path, temp_path in staged:
+            os.replace(temp_path, final_path)
+            promoted.append(final_path)
+    except Exception:
+        for final_path in promoted:
+            if os.path.exists(final_path):
+                try:
+                    os.remove(final_path)
+                except OSError:
+                    pass
+        for final_path, backup_path in backups:
+            if backup_path and os.path.exists(backup_path):
+                try:
+                    os.replace(backup_path, final_path)
+                except OSError:
+                    pass
+        for _, temp_path in staged:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        for _, backup_path in backups:
+            if backup_path and os.path.exists(backup_path):
+                try:
+                    os.remove(backup_path)
+                except OSError:
+                    pass
+        raise
+
+    for _, backup_path in backups:
+        if backup_path and os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except OSError:
+                pass
 
     return {
         "success": True,
