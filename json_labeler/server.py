@@ -456,6 +456,13 @@ def backup_existing_file(path):
     return backup_path
 
 
+class ExportRollbackError(RuntimeError):
+    def __init__(self, backup_paths):
+        self.backup_paths = backup_paths
+        joined_paths = ', '.join(backup_paths)
+        super().__init__(f'Export failed and rollback restore failed; backups preserved at: {joined_paths}')
+
+
 def empty_sidecar(source_file=""):
     source_mtime = None
     if source_file and os.path.exists(source_file):
@@ -821,19 +828,20 @@ def api_export(data):
         for final_path, temp_path in staged:
             os.replace(temp_path, final_path)
             promoted.append(final_path)
-    except Exception:
+    except Exception as promotion_error:
         for final_path in promoted:
             if os.path.exists(final_path):
                 try:
                     os.remove(final_path)
                 except OSError:
                     pass
+        unrestored_backups = []
         for final_path, backup_path in backups:
             if backup_path and os.path.exists(backup_path):
                 try:
                     os.replace(backup_path, final_path)
                 except OSError:
-                    pass
+                    unrestored_backups.append(backup_path)
         for _, temp_path in staged:
             if os.path.exists(temp_path):
                 try:
@@ -841,11 +849,13 @@ def api_export(data):
                 except OSError:
                     pass
         for _, backup_path in backups:
-            if backup_path and os.path.exists(backup_path):
+            if backup_path and backup_path not in unrestored_backups and os.path.exists(backup_path):
                 try:
                     os.remove(backup_path)
                 except OSError:
                     pass
+        if unrestored_backups:
+            raise ExportRollbackError(unrestored_backups) from promotion_error
         raise
 
     for _, backup_path in backups:

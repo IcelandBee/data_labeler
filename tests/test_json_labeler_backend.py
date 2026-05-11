@@ -375,6 +375,40 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(list(export_dir.glob("*.bak")), [])
             self.assertEqual(list(export_dir.glob(".*.bak")), [])
 
+    def test_api_export_preserves_backup_when_rollback_restore_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            export_dir = Path(tmp) / "exports"
+            export_dir.mkdir()
+            records = [make_record(0), make_record(1)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            server.api_load({"input_json_path": str(input_path)})
+            for filename in (
+                server.DEFAULT_ANNOTATED_FILENAME,
+                server.DEFAULT_PASS_FILENAME,
+                server.DEFAULT_FAIL_FILENAME,
+            ):
+                (export_dir / filename).write_text(json.dumps([{"old": filename}]), encoding="utf-8")
+
+            calls = 0
+            real_replace = os.replace
+
+            def fail_promotion_then_restore(src, dst):
+                nonlocal calls
+                calls += 1
+                if calls in (2, 3):
+                    raise OSError("replace failed")
+                return real_replace(src, dst)
+
+            with mock.patch("os.replace", side_effect=fail_promotion_then_restore):
+                with self.assertRaises(Exception) as raised:
+                    server.api_export({"export_dir": str(export_dir)})
+
+            backups = list(export_dir.glob(".*.bak"))
+            self.assertTrue(backups)
+            self.assertIn("backups preserved", str(raised.exception))
+            self.assertTrue(any(path.read_text(encoding="utf-8") for path in backups))
+
     def test_http_handler_serves_task3_routes(self):
         with tempfile.TemporaryDirectory() as tmp:
             image_path = Path(tmp) / "sample.bmp"
