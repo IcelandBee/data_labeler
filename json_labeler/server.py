@@ -21,7 +21,7 @@ import signal
 import tempfile
 import time
 import socket
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 # 默认端口
 DEFAULT_PORT = 5000
@@ -83,8 +83,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         elif parsed.path == '/image':
             query = parse_qs(parsed.query)
             self.serve_image_path(query.get('path', [''])[0])
-        elif parsed.path.startswith('/img/'):
-            self.serve_image_path(parsed.path[5:])
         elif parsed.path in ('/', '/index.html'):
             self.serve_static_file('index.html')
         elif parsed.path == '/static/app.js':
@@ -504,8 +502,7 @@ def to_img_url(path_value):
     path_value = safe_path(path_value)
     if not path_value:
         return None
-    path_value_url = path_value.replace('\\', '/')
-    return f"/img/{path_value_url}"
+    return f"/image?path={quote(path_value, safe='')}"
 
 
 def is_valid_image_file(path_value):

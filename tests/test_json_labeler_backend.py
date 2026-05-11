@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
 from unittest import mock
 
 from json_labeler import server
@@ -67,6 +68,21 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertEqual(items[0]["prompt"], "Prompt 0")
         self.assertEqual(items[1]["sample_key"], key)
         self.assertEqual(labels[key]["human_label"], "fail")
+
+    def test_build_items_emits_encoded_image_query_urls(self):
+        record = make_record(0)
+        record["file_name"] = r"C:\images\target file.jpg"
+
+        items, _ = server.build_items([record], {"labels": {}})
+        target_url = items[0]["target"]
+        parsed = urlparse(target_url)
+
+        self.assertEqual(parsed.path, "/image")
+        self.assertFalse(target_url.startswith("/img/"))
+        self.assertIn("path=", target_url)
+        self.assertIn("%5C", target_url)
+        self.assertIn("%20", target_url)
+        self.assertEqual(unquote(parse_qs(parsed.query)["path"][0]), os.path.normpath(record["file_name"]))
 
     def test_build_items_turns_non_dict_records_into_actionable_items(self):
         items, labels = server.build_items(["not a record"], {"labels": {}})
