@@ -7,7 +7,64 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <main id="app">JSON Labeler loading...</main>
+  <header class="toolbar" aria-label="Labeling controls">
+    <section class="toolbar-row load-row" aria-label="Load dataset">
+      <label class="field grow">
+        <span>Input JSON Path</span>
+        <input id="inputJsonPath" type="text" autocomplete="off" spellcheck="false" placeholder="D:\path\to\samples.json">
+      </label>
+      <button id="loadBtn" type="button">Load/Resume</button>
+    </section>
+
+    <section class="toolbar-row" aria-label="Progress sidecar">
+      <label class="field grow">
+        <span>Progress Sidecar</span>
+        <input id="progressPath" type="text" value="Not loaded" readonly>
+      </label>
+    </section>
+
+    <section class="toolbar-row export-row" aria-label="Export settings">
+      <label class="field export-dir">
+        <span>Export Directory</span>
+        <input id="exportDir" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field">
+        <span>Annotated All</span>
+        <input id="annotatedFilename" type="text" value="annotated_all.json">
+      </label>
+      <label class="field">
+        <span>Accepted Pass</span>
+        <input id="acceptedFilename" type="text" value="accepted_pass.json">
+      </label>
+      <label class="field">
+        <span>Rejected Fail</span>
+        <input id="rejectedFilename" type="text" value="rejected_fail.json">
+      </label>
+      <button id="exportBtn" type="button">Export</button>
+    </section>
+
+    <section class="statusbar" aria-label="Dataset status">
+      <output id="statsText">Total 0 | Labeled 0 | Pass 0 | Fail 0 | Unlabeled 0</output>
+      <div class="pager" aria-label="Pagination">
+        <label class="compact-field">
+          <span>Page Size</span>
+          <input id="pageSizeInput" type="number" min="1" max="200" step="1" value="20">
+        </label>
+        <button id="prevBtn" type="button">Prev</button>
+        <span id="pageText">Page 1 / 1</span>
+        <button id="nextBtn" type="button">Next</button>
+        <label class="compact-field">
+          <span>Jump</span>
+          <input id="pageJumpInput" type="number" min="1" step="1" value="1">
+        </label>
+        <button id="jumpBtn" type="button">Go</button>
+      </div>
+    </section>
+  </header>
+
+  <main id="content" class="content" aria-live="polite"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
