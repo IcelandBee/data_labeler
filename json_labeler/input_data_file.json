@@ -1,0 +1,26 @@
+[
+    {
+        "file_name": "/DATA/public/data/results/flux2klein9B-t2i-human-item-2w-distill/00000.jpg",
+        "cond_1": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/gen/00000.jpg",
+        "cond_2": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/ref/00000.jpg",
+        "prompt": "Let the person in image 1 hold a broccoli shown in image 2 in a realistic and physically coherent way, preserving object integrity and overall image consistency, while making only the minimal necessary changes and keeping everything else in image 1 unchanged.",
+        "width": 1024,
+        "height": 1024
+    },
+    {
+        "file_name": "/DATA/public/data/results/flux2klein9B-t2i-human-item-2w-distill/00008.jpg",
+        "cond_1": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/gen/00008.jpg",
+        "cond_2": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/ref/00008.jpg",
+        "prompt": "Let the person in image 1 hold an egg shown in image 2 in a realistic and physically coherent way, preserving object integrity and overall image consistency, while making only the minimal necessary changes and keeping everything else in image 1 unchanged.",
+        "width": 944,
+        "height": 1104
+    },
+    {
+        "file_name": "/DATA/public/data/results/flux2klein9B-t2i-human-item-2w-distill/00016.jpg",
+        "cond_1": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/gen/00016.jpg",
+        "cond_2": "/DATA/public/data/tripplets-generation/2w-human_item/rank00/ref/00016.jpg",
+        "prompt": "Let the person in image 1 hold a plush Hello Kitty toy with a red bow shown in image 2 in a realistic and physically coherent way, preserving object integrity and overall image consistency, while making only the minimal necessary changes and keeping everything else in image 1 unchanged.",
+        "width": 1248,
+        "height": 832
+    }
+]
