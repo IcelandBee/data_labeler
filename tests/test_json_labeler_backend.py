@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from json_labeler import server
 
@@ -61,13 +62,17 @@ class JsonLabelerBackendTests(unittest.TestCase):
 
     def test_build_items_turns_non_dict_records_into_actionable_items(self):
         items, labels = server.build_items(["not a record"], {"labels": {}})
-        expected_key = server.make_sample_key({})
 
         self.assertEqual(labels, {})
         self.assertEqual(items[0]["index"], 0)
-        self.assertEqual(items[0]["sample_key"], expected_key)
+        self.assertTrue(items[0]["sample_key"].startswith("invalid:0:"))
         self.assertIn("record", items[0]["image_errors"])
         self.assertIn("0", items[0]["image_errors"]["record"])
+
+    def test_build_items_gives_non_dict_records_distinct_fallback_keys(self):
+        items, _ = server.build_items(["not a record", "not a record"], {"labels": {}})
+
+        self.assertNotEqual(items[0]["sample_key"], items[1]["sample_key"])
 
     def test_build_items_reports_missing_and_malformed_path_fields(self):
         records = [
@@ -138,6 +143,19 @@ class JsonLabelerBackendTests(unittest.TestCase):
             corrupt_files = list(Path(tmp).glob("input.labels.corrupt-*.json"))
             self.assertEqual(len(corrupt_files), 1)
 
+    def test_load_sidecar_propagates_oserror_without_renaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sidecar_path = Path(tmp) / "input.labels.json"
+            sidecar_path.write_text('{"labels": {}}', encoding="utf-8")
+
+            with mock.patch("builtins.open", side_effect=OSError("permission denied")):
+                with self.assertRaises(OSError):
+                    server.load_sidecar(str(sidecar_path))
+
+            self.assertTrue(sidecar_path.exists())
+            corrupt_files = list(Path(tmp).glob("input.labels.corrupt-*.json"))
+            self.assertEqual(corrupt_files, [])
+
     def test_export_payloads_create_three_expected_json_arrays(self):
         records = [make_record(0), make_record(1), make_record(2)]
         labels = {
@@ -150,6 +168,18 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertNotIn("human_label", failed[0])
         self.assertEqual([x["prompt"] for x in passed], ["Prompt 0"])
         self.assertEqual([x["prompt"] for x in failed], ["Prompt 1"])
+
+    def test_export_payloads_wrap_non_dict_records_in_annotated_payload(self):
+        records = ["not a record"]
+        items, _ = server.build_items(records, {"labels": {}})
+        item_key = items[0]["sample_key"]
+        labels = {item_key: {"human_label": "pass"}}
+
+        annotated, passed, failed = server.build_export_payloads(records, labels)
+
+        self.assertEqual(annotated, [{"_invalid_record": "not a record", "human_label": "pass"}])
+        self.assertEqual(passed, ["not a record"])
+        self.assertEqual(failed, [])
 
 
 if __name__ == "__main__":

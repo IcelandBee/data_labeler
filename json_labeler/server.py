@@ -251,6 +251,16 @@ def _record_path_value(record, field):
     return str(value)
 
 
+def _has_required_path_fields(record):
+    if not isinstance(record, dict):
+        return False
+    for field in ('file_name', 'cond_1', 'cond_2'):
+        value = record.get(field)
+        if not isinstance(value, str) or not value:
+            return False
+    return True
+
+
 def make_sample_key(record):
     parts = [
         _record_path_value(record, 'file_name'),
@@ -258,6 +268,16 @@ def make_sample_key(record):
         _record_path_value(record, 'cond_2'),
     ]
     return hashlib.sha1('\n'.join(parts).encode('utf-8')).hexdigest()
+
+
+def sample_key_for_record(record, index=None):
+    if _has_required_path_fields(record):
+        return make_sample_key(record)
+
+    raw = repr(record)
+    raw_hash = hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()
+    index_part = 'unknown' if index is None else str(index)
+    return f'invalid:{index_part}:{raw_hash}'
 
 
 def default_sidecar_path(input_json_path):
@@ -359,7 +379,7 @@ def load_sidecar(sidecar_path, source_file=""):
             sidecar = json.load(f)
         if not isinstance(sidecar, dict) or not isinstance(sidecar.get('labels'), dict):
             raise ValueError('Invalid sidecar shape')
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
         os.replace(sidecar_path, _corrupt_sidecar_path(sidecar_path))
         return empty_sidecar(source_file)
 
@@ -457,7 +477,7 @@ def normalize_record_for_item(record, index):
 
     item.update({
         'index': index,
-        'sample_key': make_sample_key(record),
+        'sample_key': sample_key_for_record(record, index),
         'source_path': source_path,
         'reference_path': reference_path,
         'target_path': target_path,
@@ -504,8 +524,8 @@ def compute_stats(records, labels):
     passed = 0
     failed = 0
 
-    for record in records:
-        sample_key = make_sample_key(record)
+    for index, record in enumerate(records):
+        sample_key = sample_key_for_record(record, index)
         entry = labels.get(sample_key, {})
         human_label = entry.get('human_label') if isinstance(entry, dict) else None
         if human_label == 'pass':
@@ -539,13 +559,19 @@ def build_export_payloads(records, labels):
     passed = []
     failed = []
 
-    for record in records:
-        sample_key = make_sample_key(record)
+    for index, record in enumerate(records):
+        sample_key = sample_key_for_record(record, index)
         entry = labels.get(sample_key, {})
         human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
 
-        annotated = copy.deepcopy(record)
-        annotated['human_label'] = human_label
+        if isinstance(record, dict):
+            annotated = copy.deepcopy(record)
+            annotated['human_label'] = human_label
+        else:
+            annotated = {
+                '_invalid_record': copy.deepcopy(record),
+                'human_label': human_label,
+            }
         annotated_all.append(annotated)
 
         if human_label == 'pass':
