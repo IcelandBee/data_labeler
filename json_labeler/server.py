@@ -10,11 +10,15 @@ if sys.platform == 'win32':
 
 import http.server
 import socketserver
+import copy
+import datetime
+import hashlib
 import json
 import os
 import sys
 import argparse
 import signal
+import tempfile
 import time
 import socket
 from urllib.parse import unquote
@@ -22,6 +26,10 @@ from urllib.parse import unquote
 # 默认端口
 DEFAULT_PORT = 5000
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'}
+ALLOWED_LABELS = {"", "pass", "fail"}
+DEFAULT_ANNOTATED_FILENAME = "annotated_all.json"
+DEFAULT_PASS_FILENAME = "accepted_pass.json"
+DEFAULT_FAIL_FILENAME = "rejected_fail.json"
 
 # 全局变量
 server_instance = None
@@ -210,6 +218,163 @@ def safe_path(path_str):
     return normalized
 
 
+def now_iso():
+    return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def read_json_records(json_path):
+    json_path = safe_path(json_path)
+    if not json_path or not os.path.exists(json_path):
+        raise FileNotFoundError(f'JSON file does not exist: {json_path}')
+    if not os.path.isfile(json_path):
+        raise ValueError(f'Not a file: {json_path}')
+
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    if not isinstance(data, list):
+        raise ValueError('JSON file content must be a list')
+    return data
+
+
+def make_sample_key(record):
+    parts = [
+        str(record.get('file_name', '')),
+        str(record.get('cond_1', '')),
+        str(record.get('cond_2', '')),
+    ]
+    return hashlib.sha1('\n'.join(parts).encode('utf-8')).hexdigest()
+
+
+def default_sidecar_path(input_json_path):
+    input_json_path = safe_path(input_json_path)
+    root, _ = os.path.splitext(input_json_path)
+    return os.path.normpath(f'{root}.labels.json')
+
+
+def sanitize_export_filename(name, default_name=None):
+    fallback = default_name or 'export.json'
+    value = str(name or '').replace('\\', '/').split('/')[-1]
+    unsafe_chars = '<>:"/\\|?*'
+    sanitized = ''.join('_' if ch in unsafe_chars or ord(ch) < 32 else ch for ch in value)
+    sanitized = sanitized.strip(' .')
+
+    if not sanitized:
+        if default_name and name != default_name:
+            return sanitize_export_filename(default_name)
+        sanitized = fallback
+
+    if not sanitized.lower().endswith('.json'):
+        sanitized = f'{sanitized}.json'
+    return sanitized
+
+
+def validate_export_filenames(annotated_name, pass_name, fail_name):
+    names = [
+        sanitize_export_filename(annotated_name, DEFAULT_ANNOTATED_FILENAME),
+        sanitize_export_filename(pass_name, DEFAULT_PASS_FILENAME),
+        sanitize_export_filename(fail_name, DEFAULT_FAIL_FILENAME),
+    ]
+    folded = [name.lower() for name in names]
+    if len(set(folded)) != len(folded):
+        raise ValueError('Export filenames must be unique')
+    return tuple(names)
+
+
+def atomic_write_json(path, payload):
+    path = os.path.normpath(path)
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
+
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f'.{os.path.basename(path)}.',
+            suffix='.tmp',
+            dir=directory,
+        )
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
+
+
+def empty_sidecar(source_file=""):
+    source_mtime = None
+    if source_file and os.path.exists(source_file):
+        source_mtime = os.path.getmtime(source_file)
+    return {
+        'source_file': source_file,
+        'source_mtime': source_mtime,
+        'updated_at': now_iso(),
+        'labels': {},
+    }
+
+
+def _corrupt_sidecar_path(sidecar_path):
+    root, _ = os.path.splitext(sidecar_path)
+    timestamp = time.strftime('%Y%m%d_%H%M%S')
+    candidate = f'{root}.corrupt-{timestamp}.json'
+    if not os.path.exists(candidate):
+        return candidate
+
+    counter = 1
+    while True:
+        candidate = f'{root}.corrupt-{timestamp}-{counter}.json'
+        if not os.path.exists(candidate):
+            return candidate
+        counter += 1
+
+
+def load_sidecar(sidecar_path, source_file=""):
+    sidecar_path = os.path.normpath(sidecar_path)
+    if not os.path.exists(sidecar_path):
+        return empty_sidecar(source_file)
+
+    try:
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            sidecar = json.load(f)
+        if not isinstance(sidecar, dict) or not isinstance(sidecar.get('labels'), dict):
+            raise ValueError('Invalid sidecar shape')
+    except Exception:
+        os.replace(sidecar_path, _corrupt_sidecar_path(sidecar_path))
+        return empty_sidecar(source_file)
+
+    labels = {}
+    for sample_key, entry in sidecar.get('labels', {}).items():
+        if not isinstance(sample_key, str) or not isinstance(entry, dict):
+            continue
+        human_label = entry.get('human_label', '')
+        if human_label not in ALLOWED_LABELS:
+            continue
+        labels[sample_key] = {
+            'human_label': human_label,
+            'updated_at': entry.get('updated_at', ''),
+        }
+
+    sidecar['labels'] = labels
+    sidecar.setdefault('source_file', source_file)
+    sidecar.setdefault('source_mtime', os.path.getmtime(source_file) if source_file and os.path.exists(source_file) else None)
+    sidecar.setdefault('updated_at', now_iso())
+    return sidecar
+
+
+def save_sidecar(sidecar_path, sidecar):
+    sidecar = copy.deepcopy(sidecar)
+    sidecar['updated_at'] = now_iso()
+    atomic_write_json(sidecar_path, sidecar)
+    return sidecar
+
+
 def load_jsonl_records(jsonl_path):
     with open(jsonl_path, 'r', encoding='utf-8') as f:
         content = f.read().strip()
@@ -249,6 +414,128 @@ def is_valid_image_file(path_value):
         return False
     ext = os.path.splitext(path_value)[1].lower()
     return ext in SUPPORTED_EXTENSIONS
+
+
+def _image_error(path_value):
+    if not path_value:
+        return 'missing path'
+    if not os.path.exists(path_value):
+        return 'file does not exist'
+    if not os.path.isfile(path_value):
+        return 'not a file'
+    ext = os.path.splitext(path_value)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        return 'unsupported image type'
+    return None
+
+
+def normalize_record_for_item(record, index):
+    item = copy.deepcopy(record)
+    source_path = safe_path(record.get('cond_1', ''))
+    reference_path = safe_path(record.get('cond_2', ''))
+    target_path = safe_path(record.get('file_name', ''))
+    image_fields = {
+        'cond_1': source_path,
+        'cond_2': reference_path,
+        'file_name': target_path,
+    }
+
+    item.update({
+        'index': index,
+        'sample_key': make_sample_key(record),
+        'source_path': source_path,
+        'reference_path': reference_path,
+        'target_path': target_path,
+        'source': to_img_url(source_path),
+        'reference': to_img_url(reference_path),
+        'target': to_img_url(target_path),
+        'image_errors': {},
+    })
+
+    for field, path_value in image_fields.items():
+        error = _image_error(path_value)
+        if error:
+            item['image_errors'][field] = error
+
+    return item
+
+
+def build_items(records, sidecar):
+    items = []
+    labels = {}
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for index, record in enumerate(records):
+        item = normalize_record_for_item(record, index)
+        items.append(item)
+        sidecar_entry = sidecar_labels.get(item['sample_key'])
+        if not isinstance(sidecar_entry, dict):
+            continue
+        human_label = sidecar_entry.get('human_label', '')
+        if human_label not in ALLOWED_LABELS:
+            continue
+        labels[item['sample_key']] = {
+            'human_label': human_label,
+            'updated_at': sidecar_entry.get('updated_at', ''),
+        }
+
+    return items, labels
+
+
+def compute_stats(records, labels):
+    current_keys = {make_sample_key(record) for record in records}
+    passed = 0
+    failed = 0
+
+    for sample_key in current_keys:
+        entry = labels.get(sample_key, {})
+        human_label = entry.get('human_label') if isinstance(entry, dict) else None
+        if human_label == 'pass':
+            passed += 1
+        elif human_label == 'fail':
+            failed += 1
+
+    labeled = passed + failed
+    total = len(records)
+    return {
+        'total': total,
+        'pass': passed,
+        'fail': failed,
+        'labeled': labeled,
+        'unlabeled': total - labeled,
+    }
+
+
+def apply_label(labels, sample_key, human_label, now=None):
+    if human_label not in ALLOWED_LABELS:
+        raise ValueError(f'Invalid label: {human_label}')
+    labels[sample_key] = {
+        'human_label': human_label,
+        'updated_at': now or now_iso(),
+    }
+    return labels[sample_key]
+
+
+def build_export_payloads(records, labels):
+    annotated_all = []
+    passed = []
+    failed = []
+
+    for record in records:
+        sample_key = make_sample_key(record)
+        entry = labels.get(sample_key, {})
+        human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
+
+        annotated = copy.deepcopy(record)
+        annotated['human_label'] = human_label
+        annotated_all.append(annotated)
+
+        if human_label == 'pass':
+            passed.append(copy.deepcopy(record))
+        elif human_label == 'fail':
+            failed.append(copy.deepcopy(record))
+
+    return annotated_all, passed, failed
 
 
 def scan_jsonl(jsonl_path_raw):
