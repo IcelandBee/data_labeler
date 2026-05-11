@@ -23,7 +23,10 @@ class JsonLabelerBackendTests(unittest.TestCase):
         record = make_record(1)
         key_1 = server.make_sample_key(record)
         key_2 = server.make_sample_key(dict(reversed(list(record.items()))))
+        changed_metadata = dict(record, prompt="Changed", width=512, height=512)
+        key_3 = server.make_sample_key(changed_metadata)
         self.assertEqual(key_1, key_2)
+        self.assertEqual(key_1, key_3)
         self.assertEqual(len(key_1), 40)
 
     def test_default_sidecar_path(self):
@@ -77,11 +80,11 @@ class JsonLabelerBackendTests(unittest.TestCase):
         key = server.make_sample_key(record)
         labels = {}
         server.apply_label(labels, key, "pass", now="t1")
-        self.assertEqual(labels[key]["human_label"], "pass")
+        self.assertEqual(labels[key], {"human_label": "pass", "updated_at": "t1"})
         server.apply_label(labels, key, "fail", now="t2")
-        self.assertEqual(labels[key]["human_label"], "fail")
+        self.assertEqual(labels[key], {"human_label": "fail", "updated_at": "t2"})
         server.apply_label(labels, key, "", now="t3")
-        self.assertEqual(labels[key]["human_label"], "")
+        self.assertEqual(labels[key], {"human_label": "", "updated_at": "t3"})
         with self.assertRaises(ValueError):
             server.apply_label(labels, key, "reject", now="t4")
 
