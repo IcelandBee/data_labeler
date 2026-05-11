@@ -21,7 +21,7 @@ import signal
 import tempfile
 import time
 import socket
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote, urlparse
 
 # 默认端口
 DEFAULT_PORT = 5000
@@ -77,30 +77,43 @@ def get_display_host(bind_host):
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
-        if self.path.startswith('/api/'):
+        parsed = urlparse(self.path)
+        if parsed.path in ('/api/health', '/api/shutdown'):
             self.handle_api()
-        elif self.path.startswith('/img/'):
-            self.serve_image()
+        elif parsed.path == '/image':
+            query = parse_qs(parsed.query)
+            self.serve_image_path(query.get('path', [''])[0])
+        elif parsed.path.startswith('/img/'):
+            self.serve_image_path(parsed.path[5:])
+        elif parsed.path in ('/', '/index.html'):
+            self.serve_static_file('index.html')
+        elif parsed.path == '/static/app.js':
+            self.serve_static_file(os.path.join('static', 'app.js'))
+        elif parsed.path == '/static/style.css':
+            self.serve_static_file(os.path.join('static', 'style.css'))
         else:
-            path = self.path.lstrip('/')
-            if path == '':
-                path = 'index.html'
+            self.send_error(404, 'Not Found')
 
-            if '..' in path:
-                self.send_error(403, 'Forbidden')
-                return
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        routes = {
+            '/api/load': api_load,
+            '/api/label': api_label,
+            '/api/export': api_export,
+        }
+        handler = routes.get(parsed.path)
+        if not handler:
+            self.write_json({'success': False, 'error': 'Unknown endpoint'}, status=404)
+            return
 
-            if os.path.exists(path) and os.path.isfile(path):
-                self.serve_file(path)
-            else:
-                self.send_error(404, 'Not Found')
+        try:
+            self.write_json(handler(self.read_json_body()))
+        except Exception as e:
+            self.write_json({'success': False, 'error': str(e)}, status=400)
 
     def handle_api(self):
-        from urllib.parse import urlparse, parse_qs
-
         parsed = urlparse(self.path)
         path = parsed.path
-        query = parse_qs(parsed.query)
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -110,23 +123,49 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         try:
             if path == '/api/health':
                 result = {'status': 'ok', 'port': server_instance.server_address[1] if server_instance else DEFAULT_PORT}
-            elif path == '/api/scan':
-                jsonl_path = query.get('jsonl', [''])[0]
-                result = scan_jsonl(jsonl_path)
             elif path == '/api/shutdown':
                 self.handle_shutdown()
                 result = {'success': True, 'message': '服务器正在关闭'}
-            elif path == '/api/export':
-                jsonl_path = query.get('jsonl', [''])[0]
-                evaluations_json = query.get('evaluations', [''])[0]
-                result = handle_export_request(jsonl_path, evaluations_json)
             else:
-                result = {'error': 'Unknown endpoint'}
+                result = {'success': False, 'error': 'Unknown endpoint'}
 
             self.wfile.write(json.dumps(result, ensure_ascii=False).encode('utf-8'))
         except Exception as e:
             import traceback
             self.wfile.write(json.dumps({'error': str(e), 'traceback': traceback.format_exc()}, ensure_ascii=False).encode('utf-8'))
+
+    def serve_image_path(self, raw_path):
+        img_path = safe_path(raw_path)
+
+        if not img_path or '..' in img_path:
+            self.send_error(403, 'Forbidden')
+            return
+
+        if not is_valid_image_file(img_path):
+            self.send_error(404, _image_error(img_path) or 'Image not found')
+            return
+
+        ext = os.path.splitext(img_path)[1].lower()
+        mime_types = {
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.gif': 'image/gif',
+            '.webp': 'image/webp', '.bmp': 'image/bmp',
+        }
+        content_type = mime_types.get(ext, 'application/octet-stream')
+
+        try:
+            with open(img_path, 'rb') as f:
+                content = f.read()
+        except Exception as e:
+            self.send_error(500, str(e))
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', len(content))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(content)
 
     def serve_image(self):
         img_path = self.path[5:]
@@ -193,6 +232,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', content_type)
+        self.send_header('Content-Length', len(content))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(content)
+
+    def serve_static_file(self, relative_path):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.normpath(os.path.join(base_dir, relative_path))
+        if not filepath.startswith(base_dir) or not os.path.isfile(filepath):
+            self.send_error(404, 'Not Found')
+            return
+        self.serve_file(filepath)
+
+    def read_json_body(self):
+        length = int(self.headers.get('Content-Length') or '0')
+        if length == 0:
+            return {}
+        data = json.loads(self.rfile.read(length).decode('utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError('JSON body must be an object')
+        return data
+
+    def write_json(self, payload, status=200):
+        content = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', len(content))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
@@ -580,6 +645,105 @@ def build_export_payloads(records, labels):
             failed.append(copy.deepcopy(record))
 
     return annotated_all, passed, failed
+
+
+STATE = {"input_json_path": "", "sidecar_path": "", "records": [], "sidecar": empty_sidecar("")}
+
+
+def _current_labels():
+    sidecar = STATE.get("sidecar") if isinstance(STATE, dict) else {}
+    labels = sidecar.get("labels", {}) if isinstance(sidecar, dict) else {}
+    if not isinstance(labels, dict):
+        labels = {}
+        sidecar["labels"] = labels
+    return labels
+
+
+def _loaded_sample_keys(records):
+    return {sample_key_for_record(record, index) for index, record in enumerate(records)}
+
+
+def api_load(data):
+    input_json_path = safe_path(data.get("input_json_path") if isinstance(data, dict) else "")
+    if not input_json_path:
+        raise ValueError("input_json_path is required")
+
+    records = read_json_records(input_json_path)
+    sidecar_path = default_sidecar_path(input_json_path)
+    sidecar = load_sidecar(sidecar_path, input_json_path)
+    items, labels = build_items(records, sidecar)
+
+    STATE.update({
+        "input_json_path": input_json_path,
+        "sidecar_path": sidecar_path,
+        "records": records,
+        "sidecar": sidecar,
+    })
+
+    return {
+        "success": True,
+        "items": items,
+        "labels": labels,
+        "progress_path": sidecar_path,
+        "stats": compute_stats(records, labels),
+    }
+
+
+def api_label(data):
+    records = STATE.get("records", [])
+    sidecar_path = STATE.get("sidecar_path", "")
+    if not records or not sidecar_path:
+        raise ValueError("No dataset loaded")
+
+    sample_key = data.get("sample_key") if isinstance(data, dict) else ""
+    if sample_key not in _loaded_sample_keys(records):
+        raise ValueError("sample_key is not in the loaded dataset")
+
+    human_label = data.get("human_label", "") if isinstance(data, dict) else ""
+    label = apply_label(_current_labels(), sample_key, human_label)
+    STATE["sidecar"] = save_sidecar(sidecar_path, STATE["sidecar"])
+    return {
+        "success": True,
+        "sample_key": sample_key,
+        "label": label,
+        "stats": compute_stats(records, _current_labels()),
+    }
+
+
+def api_export(data):
+    records = STATE.get("records", [])
+    if not records:
+        raise ValueError("No dataset loaded")
+
+    export_dir = safe_path(data.get("export_dir") if isinstance(data, dict) else "")
+    if not export_dir:
+        raise ValueError("export_dir is required")
+
+    annotated_name, pass_name, fail_name = validate_export_filenames(
+        data.get("annotated_filename", DEFAULT_ANNOTATED_FILENAME),
+        data.get("pass_filename", DEFAULT_PASS_FILENAME),
+        data.get("fail_filename", DEFAULT_FAIL_FILENAME),
+    )
+    annotated, passed, failed = build_export_payloads(records, _current_labels())
+    paths = {
+        "annotated": os.path.normpath(os.path.join(export_dir, annotated_name)),
+        "pass": os.path.normpath(os.path.join(export_dir, pass_name)),
+        "fail": os.path.normpath(os.path.join(export_dir, fail_name)),
+    }
+
+    atomic_write_json(paths["annotated"], annotated)
+    atomic_write_json(paths["pass"], passed)
+    atomic_write_json(paths["fail"], failed)
+
+    return {
+        "success": True,
+        "paths": paths,
+        "counts": {
+            "annotated": len(annotated),
+            "pass": len(passed),
+            "fail": len(failed),
+        },
+    }
 
 
 def scan_jsonl(jsonl_path_raw):

@@ -20,6 +20,14 @@ def make_record(index=0, label_suffix=""):
 
 
 class JsonLabelerBackendTests(unittest.TestCase):
+    def setUp(self):
+        server.STATE = {
+            "input_json_path": "",
+            "sidecar_path": "",
+            "records": [],
+            "sidecar": server.empty_sidecar(""),
+        }
+
     def test_sample_key_is_stable_and_order_independent(self):
         record = make_record(1)
         key_1 = server.make_sample_key(record)
@@ -180,6 +188,86 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertEqual(annotated, [{"_invalid_record": "not a record", "human_label": "pass"}])
         self.assertEqual(passed, ["not a record"])
         self.assertEqual(failed, [])
+
+    def test_api_load_reads_json_initializes_state_and_resumes_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            records = [make_record(0), make_record(1)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            sidecar_path = Path(server.default_sidecar_path(str(input_path)))
+            key = server.make_sample_key(records[1])
+            sidecar_path.write_text(
+                json.dumps({
+                    "source_file": str(input_path),
+                    "labels": {key: {"human_label": "fail", "updated_at": "saved"}},
+                }),
+                encoding="utf-8",
+            )
+
+            result = server.api_load({"input_json_path": str(input_path)})
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["progress_path"], str(sidecar_path))
+            self.assertEqual(len(result["items"]), 2)
+            self.assertEqual(result["labels"][key]["human_label"], "fail")
+            self.assertEqual(result["stats"], {
+                "total": 2,
+                "pass": 0,
+                "fail": 1,
+                "labeled": 1,
+                "unlabeled": 1,
+            })
+            self.assertEqual(server.STATE["input_json_path"], os.path.normpath(str(input_path)))
+            self.assertEqual(server.STATE["sidecar_path"], str(sidecar_path))
+            self.assertEqual(server.STATE["records"], records)
+
+    def test_api_label_updates_and_writes_sidecar_then_returns_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            records = [make_record(0), make_record(1)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            load_result = server.api_load({"input_json_path": str(input_path)})
+            sample_key = load_result["items"][0]["sample_key"]
+
+            result = server.api_label({"sample_key": sample_key, "human_label": "pass"})
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["label"]["human_label"], "pass")
+            self.assertEqual(result["stats"]["pass"], 1)
+            self.assertEqual(result["stats"]["unlabeled"], 1)
+            saved = json.loads(Path(load_result["progress_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(saved["labels"][sample_key]["human_label"], "pass")
+
+    def test_api_export_writes_sanitized_custom_files_and_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            export_dir = Path(tmp) / "exports"
+            records = [make_record(0), make_record(1), make_record(2)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            load_result = server.api_load({"input_json_path": str(input_path)})
+            server.api_label({"sample_key": load_result["items"][0]["sample_key"], "human_label": "pass"})
+            server.api_label({"sample_key": load_result["items"][1]["sample_key"], "human_label": "fail"})
+
+            result = server.api_export({
+                "export_dir": str(export_dir),
+                "annotated_filename": r"..\annotated:all",
+                "pass_filename": "kept",
+                "fail_filename": "bad|ones.json",
+            })
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["counts"], {"annotated": 3, "pass": 1, "fail": 1})
+            self.assertEqual(set(Path(path).name for path in result["paths"].values()), {
+                "annotated_all.json",
+                "kept.json",
+                "bad_ones.json",
+            })
+            annotated = json.loads((export_dir / "annotated_all.json").read_text(encoding="utf-8"))
+            passed = json.loads((export_dir / "kept.json").read_text(encoding="utf-8"))
+            failed = json.loads((export_dir / "bad_ones.json").read_text(encoding="utf-8"))
+            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail", ""])
+            self.assertEqual([item["prompt"] for item in passed], ["Prompt 0"])
+            self.assertEqual([item["prompt"] for item in failed], ["Prompt 1"])
 
 
 if __name__ == "__main__":
