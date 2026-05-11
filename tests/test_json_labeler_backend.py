@@ -1,9 +1,12 @@
+import http.client
 import json
 import os
+import socketserver
 import tempfile
+import threading
 import unittest
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from unittest import mock
 
 from json_labeler import server
@@ -28,6 +31,28 @@ class JsonLabelerBackendTests(unittest.TestCase):
             "records": [],
             "sidecar": server.empty_sidecar(""),
         }
+
+    def request_handler(self, method, path, body=None, headers=None):
+        class QuietHandler(server.Handler):
+            def log_message(self, format, *args):
+                pass
+
+        httpd = socketserver.TCPServer(("127.0.0.1", 0), QuietHandler)
+        thread = threading.Thread(target=httpd.serve_forever)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+            try:
+                conn.request(method, path, body=body, headers=headers or {})
+                response = conn.getresponse()
+                content = response.read()
+                return response.status, response.getheaders(), content
+            finally:
+                conn.close()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=5)
 
     def test_sample_key_is_stable_and_order_independent(self):
         record = make_record(1)
@@ -284,6 +309,79 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail", ""])
             self.assertEqual([item["prompt"] for item in passed], ["Prompt 0"])
             self.assertEqual([item["prompt"] for item in failed], ["Prompt 1"])
+
+    def test_api_export_stages_all_payloads_before_promoting_final_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            export_dir = Path(tmp) / "exports"
+            records = [make_record(0), make_record(1)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            server.api_load({"input_json_path": str(input_path)})
+            calls = 0
+            real_dump = json.dump
+
+            def fail_second_dump(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("staging failed")
+                return real_dump(*args, **kwargs)
+
+            with mock.patch("json.dump", side_effect=fail_second_dump):
+                with self.assertRaises(OSError):
+                    server.api_export({"export_dir": str(export_dir)})
+
+            self.assertFalse((export_dir / server.DEFAULT_ANNOTATED_FILENAME).exists())
+            self.assertFalse((export_dir / server.DEFAULT_PASS_FILENAME).exists())
+            self.assertFalse((export_dir / server.DEFAULT_FAIL_FILENAME).exists())
+            self.assertEqual(list(export_dir.glob("*.tmp")), [])
+            self.assertEqual(list(export_dir.glob(".*.tmp")), [])
+
+    def test_http_handler_serves_task3_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "sample.bmp"
+            image_path.write_bytes(b"BMminimal")
+
+            status, headers, _ = self.request_handler("GET", "/")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", dict(headers).get("Content-Type", ""))
+
+            status, headers, _ = self.request_handler("GET", "/static/app.js")
+            self.assertEqual(status, 200)
+            self.assertIn("javascript", dict(headers).get("Content-Type", ""))
+
+            status, _, _ = self.request_handler("GET", "/static/missing.js")
+            self.assertEqual(status, 404)
+
+            status, _, _ = self.request_handler("GET", "/../server.py")
+            self.assertNotEqual(status, 200)
+
+            status, headers, _ = self.request_handler("GET", f"/image?path={quote(str(image_path), safe='')}")
+            self.assertEqual(status, 200)
+            self.assertEqual(dict(headers).get("Content-Type"), "image/bmp")
+
+            status, _, _ = self.request_handler("GET", f"/image?path={quote(str(Path(tmp) / 'missing.bmp'), safe='')}")
+            self.assertEqual(status, 404)
+
+            status, headers, body = self.request_handler(
+                "POST",
+                "/api/unknown",
+                body=b"{}",
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 404)
+            self.assertIn("application/json", dict(headers).get("Content-Type", ""))
+            self.assertFalse(json.loads(body.decode("utf-8"))["success"])
+
+            status, headers, body = self.request_handler(
+                "POST",
+                "/api/load",
+                body=b"{",
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertNotEqual(status, 200)
+            self.assertIn("application/json", dict(headers).get("Content-Type", ""))
+            self.assertFalse(json.loads(body.decode("utf-8"))["success"])
 
 
 if __name__ == "__main__":

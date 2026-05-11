@@ -405,6 +405,33 @@ def atomic_write_json(path, payload):
         raise
 
 
+def stage_json_file(path, payload):
+    path = os.path.normpath(path)
+    directory = os.path.dirname(path) or '.'
+    os.makedirs(directory, exist_ok=True)
+    temp_path = None
+
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f'.{os.path.basename(path)}.',
+            suffix='.tmp',
+            dir=directory,
+        )
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        return temp_path
+    except Exception:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        raise
+
+
 def empty_sidecar(source_file=""):
     source_mtime = None
     if source_file and os.path.exists(source_file):
@@ -728,9 +755,35 @@ def api_export(data):
         "fail": os.path.normpath(os.path.join(export_dir, fail_name)),
     }
 
-    atomic_write_json(paths["annotated"], annotated)
-    atomic_write_json(paths["pass"], passed)
-    atomic_write_json(paths["fail"], failed)
+    payloads = {
+        "annotated": annotated,
+        "pass": passed,
+        "fail": failed,
+    }
+    staged = []
+    try:
+        for key, payload in payloads.items():
+            staged.append((paths[key], stage_json_file(paths[key], payload)))
+    except Exception:
+        for _, temp_path in staged:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        raise
+
+    try:
+        for final_path, temp_path in staged:
+            os.replace(temp_path, final_path)
+    except Exception:
+        for _, temp_path in staged:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+        raise
 
     return {
         "success": True,
