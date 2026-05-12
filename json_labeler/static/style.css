@@ -125,6 +125,19 @@ input[readonly] {
   font-weight: 700;
 }
 
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.shortcut-help {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .pager {
   display: flex;
   align-items: end;
