@@ -28,11 +28,13 @@ const state = {
   labels: {},
   stats: { total: 0, labeled: 0, pass: 0, fail: 0, unlabeled: 0 },
   currentPage: 1,
+  totalPages: 1,
   pageSize: storedPageSize(),
   selectedKey: "",
   hoverKey: "",
   imageViews: {},
   activePan: null,
+  loaded: false,
 };
 
 const els = {};
@@ -108,19 +110,21 @@ async function loadData() {
   els.loadBtn.textContent = "Loading...";
   try {
     const data = await postJson("/api/load", { input_json_path: inputJsonPath });
-    state.items = Array.isArray(data.items) ? data.items : [];
+    state.items = [];
     state.labels = data.labels && typeof data.labels === "object" ? data.labels : {};
     state.stats = data.stats || state.stats;
+    state.loaded = true;
     if (data.session_id) {
       state.sessionId = data.session_id;
       sessionStorage.setItem(SESSION_KEY, state.sessionId);
     }
-    state.selectedKey = firstUnlabeledKey() || state.items[0]?.sample_key || "";
-    state.currentPage = state.selectedKey ? pageForKey(state.selectedKey) : 1;
+    const firstUnlabeled = data.first_unlabeled || null;
+    state.currentPage = firstUnlabeled ? pageForIndex(firstUnlabeled.index) : 1;
+    state.selectedKey = firstUnlabeled?.sample_key || "";
     state.hoverKey = "";
     els.progressPath.value = data.progress_path || "Not loaded";
-    render();
-    showToast(`Loaded ${state.items.length} samples.`);
+    await fetchPage(state.currentPage, state.selectedKey);
+    showToast(`Loaded ${state.stats.total || 0} samples.`);
   } catch (error) {
     showToast(error.message || "Load failed.");
   } finally {
@@ -130,7 +134,7 @@ async function loadData() {
 }
 
 function totalPages() {
-  return Math.max(1, Math.ceil(state.items.length / state.pageSize));
+  return Math.max(1, state.totalPages || Math.ceil((state.stats.total || 0) / state.pageSize));
 }
 
 function clampPage() {
@@ -152,11 +156,10 @@ function updateStats(stats = state.stats) {
 }
 
 function currentPageItems() {
-  const start = (state.currentPage - 1) * state.pageSize;
-  return state.items.slice(start, start + state.pageSize);
+  return state.items;
 }
 
-function firstUnlabeledKey() {
+function firstUnlabeledOnPage() {
   const item = state.items.find((candidate) => {
     const label = state.labels[candidate.sample_key]?.human_label || "";
     return label === "";
@@ -164,10 +167,41 @@ function firstUnlabeledKey() {
   return item?.sample_key || "";
 }
 
-function pageForKey(sampleKey) {
-  const index = state.items.findIndex((item) => item.sample_key === sampleKey);
-  if (index < 0) return state.currentPage;
+function pageForIndex(index) {
+  if (!Number.isFinite(Number(index)) || Number(index) < 0) return state.currentPage;
   return Math.floor(index / state.pageSize) + 1;
+}
+
+function mergeLabels(labels) {
+  if (!labels || typeof labels !== "object") return;
+  Object.entries(labels).forEach(([key, value]) => {
+    state.labels[key] = value;
+  });
+}
+
+async function fetchPage(page, preferredKey = "") {
+  if (!state.loaded) {
+    render();
+    return;
+  }
+
+  els.content.innerHTML = `<section class="empty-state">Loading page...</section>`;
+  const data = await postJson("/api/page", {
+    page,
+    page_size: state.pageSize,
+  });
+  state.items = Array.isArray(data.items) ? data.items : [];
+  mergeLabels(data.labels);
+  state.stats = data.stats || state.stats;
+  state.currentPage = data.page || page;
+  state.totalPages = data.total_pages || totalPages();
+  state.pageSize = data.page_size || state.pageSize;
+  els.pageSizeInput.value = String(state.pageSize);
+
+  const hasPreferred = preferredKey && state.items.some((item) => item.sample_key === preferredKey);
+  state.selectedKey = hasPreferred ? preferredKey : (firstUnlabeledOnPage() || state.items[0]?.sample_key || "");
+  state.hoverKey = "";
+  render();
 }
 
 function imageViewId(sampleKey, role) {
@@ -205,7 +239,7 @@ function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
   return `<figure class="image-box ${extraClass}" data-view-id="${safeViewId}">
     <figcaption class="image-title">${safeTitle}</figcaption>
     <div class="image-stage">
-      <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" style="${imageTransformStyle(viewId)}">
+      <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" loading="lazy" decoding="async" style="${imageTransformStyle(viewId)}">
     </div>
     <div class="image-path" title="${safePath}">${safePath}</div>
   </figure>`;
@@ -253,36 +287,31 @@ function selectFirstVisible() {
   state.selectedKey = currentPageItems()[0]?.sample_key || "";
 }
 
-function prevPage() {
+async function prevPage() {
   if (state.currentPage <= 1) return;
-  state.currentPage -= 1;
-  selectFirstVisible();
-  render();
+  await fetchPage(state.currentPage - 1);
 }
 
-function nextPage() {
+async function nextPage() {
   if (state.currentPage >= totalPages()) return;
-  state.currentPage += 1;
-  selectFirstVisible();
-  render();
+  await fetchPage(state.currentPage + 1);
 }
 
-function jumpPage() {
+async function jumpPage() {
   const value = Number(els.pageJumpInput.value);
   if (!Number.isFinite(value)) return;
-  state.currentPage = Math.min(Math.max(1, Math.floor(value)), totalPages());
-  selectFirstVisible();
-  render();
+  await fetchPage(Math.min(Math.max(1, Math.floor(value)), totalPages()));
 }
 
-function changePageSize() {
-  const keyToKeep = state.selectedKey || currentPageItems()[0]?.sample_key || "";
+async function changePageSize() {
+  const selectedItem = state.items.find((item) => item.sample_key === state.selectedKey);
+  const indexToKeep = selectedItem?.index ?? ((state.currentPage - 1) * state.pageSize);
+  const keyToKeep = selectedItem?.sample_key || "";
   const nextSize = Math.min(Math.max(1, Number(els.pageSizeInput.value) || 20), 200);
   state.pageSize = nextSize;
   localStorage.setItem(PAGE_SIZE_KEY, String(nextSize));
   els.pageSizeInput.value = String(nextSize);
-  state.currentPage = keyToKeep ? pageForKey(keyToKeep) : 1;
-  render();
+  await fetchPage(pageForIndex(indexToKeep), keyToKeep);
 }
 
 function onContentClick(event) {
@@ -329,29 +358,18 @@ async function setLabel(sampleKey, humanLabel) {
   state.labels[sampleKey] = data.label || { human_label: humanLabel };
   state.stats = data.stats || state.stats;
 
-  if (humanLabel) {
-    advanceAfterLabel(sampleKey);
+  if (humanLabel && data.next_unlabeled) {
+    await fetchPage(pageForIndex(data.next_unlabeled.index), data.next_unlabeled.sample_key);
+    showToast(`Saved ${humanLabel}.`);
+    return;
+  } else if (humanLabel) {
+    state.selectedKey = sampleKey;
   } else {
     state.selectedKey = sampleKey;
   }
 
   render();
   showToast(humanLabel ? `Saved ${humanLabel}.` : "Label cleared.");
-}
-
-function advanceAfterLabel(sampleKey) {
-  const start = Math.max(0, state.items.findIndex((item) => item.sample_key === sampleKey));
-  for (let offset = 1; offset <= state.items.length; offset += 1) {
-    const index = (start + offset) % state.items.length;
-    const item = state.items[index];
-    const label = state.labels[item.sample_key]?.human_label || "";
-    if (!label) {
-      state.selectedKey = item.sample_key;
-      state.currentPage = pageForKey(item.sample_key);
-      return;
-    }
-  }
-  state.selectedKey = sampleKey;
 }
 
 async function exportData() {
@@ -473,10 +491,10 @@ function onKeyDown(event) {
 
   if (event.key === "ArrowLeft") {
     event.preventDefault();
-    prevPage();
+    prevPage().catch((error) => showToast(error.message || "Page load failed."));
   } else if (event.key === "ArrowRight") {
     event.preventDefault();
-    nextPage();
+    nextPage().catch((error) => showToast(error.message || "Page load failed."));
   } else if (event.key.toLowerCase() === "a") {
     event.preventDefault();
     setLabel(activeKey(), "pass").catch((error) => showToast(error.message || "Label failed."));
@@ -492,13 +510,13 @@ function onKeyDown(event) {
 function bindEvents() {
   els.loadBtn.addEventListener("click", loadData);
   els.exportBtn.addEventListener("click", () => exportData().catch((error) => showToast(error.message || "Export failed.")));
-  els.prevBtn.addEventListener("click", prevPage);
-  els.nextBtn.addEventListener("click", nextPage);
-  els.jumpBtn.addEventListener("click", jumpPage);
+  els.prevBtn.addEventListener("click", () => prevPage().catch((error) => showToast(error.message || "Page load failed.")));
+  els.nextBtn.addEventListener("click", () => nextPage().catch((error) => showToast(error.message || "Page load failed.")));
+  els.jumpBtn.addEventListener("click", () => jumpPage().catch((error) => showToast(error.message || "Page load failed.")));
   els.pageJumpInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") jumpPage();
+    if (event.key === "Enter") jumpPage().catch((error) => showToast(error.message || "Page load failed."));
   });
-  els.pageSizeInput.addEventListener("change", changePageSize);
+  els.pageSizeInput.addEventListener("change", () => changePageSize().catch((error) => showToast(error.message || "Page load failed.")));
   els.content.addEventListener("click", onContentClick);
   els.content.addEventListener("mouseover", onContentHover);
   els.content.addEventListener("mouseout", onContentLeave);

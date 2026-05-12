@@ -33,6 +33,7 @@ DEFAULT_ANNOTATED_FILENAME = "annotated_all.json"
 DEFAULT_PASS_FILENAME = "accepted_pass.json"
 DEFAULT_FAIL_FILENAME = "rejected_fail.json"
 DEFAULT_SESSION_ID = "default"
+MAX_PAGE_SIZE = 200
 
 # 全局变量
 server_instance = None
@@ -99,6 +100,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         routes = {
             '/api/load': api_load,
+            '/api/page': api_page,
             '/api/label': api_label,
             '/api/export': api_export,
         }
@@ -642,6 +644,66 @@ def build_items(records, sidecar):
     return items, labels
 
 
+def labels_for_items(items, sidecar):
+    labels = {}
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for item in items:
+        sidecar_entry = sidecar_labels.get(item.get('sample_key', ''))
+        if not isinstance(sidecar_entry, dict):
+            continue
+        human_label = sidecar_entry.get('human_label', '')
+        if human_label not in ALLOWED_LABELS:
+            continue
+        labels[item['sample_key']] = {
+            'human_label': human_label,
+            'updated_at': sidecar_entry.get('updated_at', ''),
+        }
+
+    return labels
+
+
+def labels_for_records(records, sidecar):
+    labels = {}
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for index, record in enumerate(records):
+        sample_key = sample_key_for_record(record, index)
+        sidecar_entry = sidecar_labels.get(sample_key)
+        if not isinstance(sidecar_entry, dict):
+            continue
+        human_label = sidecar_entry.get('human_label', '')
+        if human_label not in ALLOWED_LABELS:
+            continue
+        labels[sample_key] = {
+            'human_label': human_label,
+            'updated_at': sidecar_entry.get('updated_at', ''),
+        }
+
+    return labels
+
+
+def page_bounds(total, page, page_size):
+    page_size = max(1, min(MAX_PAGE_SIZE, int(page_size or 20)))
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(total_pages, int(page or 1)))
+    start = (page - 1) * page_size
+    end = min(total, start + page_size)
+    return page, page_size, total_pages, start, end
+
+
+def build_page(records, sidecar, page=1, page_size=20):
+    page, page_size, total_pages, start, end = page_bounds(len(records), page, page_size)
+    items = [normalize_record_for_item(record, index) for index, record in enumerate(records[start:end], start)]
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "items": items,
+        "labels": labels_for_items(items, sidecar),
+    }
+
+
 def compute_stats(records, labels):
     passed = 0
     failed = 0
@@ -752,6 +814,29 @@ def _loaded_sample_keys(records):
     return {sample_key_for_record(record, index) for index, record in enumerate(records)}
 
 
+def find_sample_index(records, sample_key):
+    for index, record in enumerate(records):
+        if sample_key_for_record(record, index) == sample_key:
+            return index
+    return -1
+
+
+def unlabeled_at(records, labels, start_index=0, wrap=False):
+    total = len(records)
+    if total == 0:
+        return None
+
+    limit = total if wrap else max(0, total - start_index)
+    for offset in range(limit):
+        index = (start_index + offset) % total
+        sample_key = sample_key_for_record(records[index], index)
+        entry = labels.get(sample_key, {})
+        human_label = entry.get('human_label') if isinstance(entry, dict) else ''
+        if not human_label:
+            return {"sample_key": sample_key, "index": index}
+    return None
+
+
 def api_load(data):
     session_id, state = _state_for_request(data)
     input_json_path = safe_path(data.get("input_json_path") if isinstance(data, dict) else "")
@@ -761,7 +846,7 @@ def api_load(data):
     records = read_json_records(input_json_path)
     sidecar_path = default_sidecar_path(input_json_path)
     sidecar = load_sidecar(sidecar_path, input_json_path)
-    items, labels = build_items(records, sidecar)
+    labels = labels_for_records(records, sidecar)
 
     state.update({
         "input_json_path": input_json_path,
@@ -773,11 +858,31 @@ def api_load(data):
     return {
         "success": True,
         "session_id": session_id,
-        "items": items,
         "labels": labels,
+        "first_unlabeled": unlabeled_at(records, labels),
         "progress_path": sidecar_path,
         "stats": compute_stats(records, labels),
     }
+
+
+def api_page(data):
+    session_id, state = _state_for_request(data)
+    records = state.get("records", [])
+    if not records:
+        raise ValueError("No dataset loaded")
+
+    page_data = build_page(
+        records,
+        state.get("sidecar", {}),
+        data.get("page", 1) if isinstance(data, dict) else 1,
+        data.get("page_size", 20) if isinstance(data, dict) else 20,
+    )
+    page_data.update({
+        "success": True,
+        "session_id": session_id,
+        "stats": compute_stats(records, _current_labels(state)),
+    })
+    return page_data
 
 
 def api_label(data):
@@ -788,18 +893,21 @@ def api_label(data):
         raise ValueError("No dataset loaded")
 
     sample_key = data.get("sample_key") if isinstance(data, dict) else ""
-    if sample_key not in _loaded_sample_keys(records):
+    sample_index = find_sample_index(records, sample_key)
+    if sample_index < 0:
         raise ValueError("sample_key is not in the loaded dataset")
 
     human_label = data.get("human_label", "") if isinstance(data, dict) else ""
     label = apply_label(_current_labels(state), sample_key, human_label)
     state["sidecar"] = save_sidecar(sidecar_path, state["sidecar"])
+    labels = _current_labels(state)
     return {
         "success": True,
         "session_id": session_id,
         "sample_key": sample_key,
         "label": label,
-        "stats": compute_stats(records, _current_labels(state)),
+        "next_unlabeled": unlabeled_at(records, labels, sample_index + 1, wrap=True),
+        "stats": compute_stats(records, labels),
     }
 
 

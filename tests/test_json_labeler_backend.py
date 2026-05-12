@@ -250,8 +250,9 @@ class JsonLabelerBackendTests(unittest.TestCase):
 
             self.assertTrue(result["success"])
             self.assertEqual(result["progress_path"], str(sidecar_path))
-            self.assertEqual(len(result["items"]), 2)
+            self.assertNotIn("items", result)
             self.assertEqual(result["labels"][key]["human_label"], "fail")
+            self.assertEqual(result["first_unlabeled"]["sample_key"], server.make_sample_key(records[0]))
             self.assertEqual(result["stats"], {
                 "total": 2,
                 "pass": 0,
@@ -263,18 +264,36 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(server.STATE["sidecar_path"], str(sidecar_path))
             self.assertEqual(server.STATE["records"], records)
 
+    def test_api_page_returns_only_requested_items_after_load(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            records = [make_record(0), make_record(1), make_record(2)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            server.api_load({"input_json_path": str(input_path)})
+
+            result = server.api_page({"page": 2, "page_size": 1})
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["page"], 2)
+            self.assertEqual(result["page_size"], 1)
+            self.assertEqual(result["total_pages"], 3)
+            self.assertEqual(len(result["items"]), 1)
+            self.assertEqual(result["items"][0]["prompt"], "Prompt 1")
+
     def test_api_label_updates_and_writes_sidecar_then_returns_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "input.json"
             records = [make_record(0), make_record(1)]
             input_path.write_text(json.dumps(records), encoding="utf-8")
             load_result = server.api_load({"input_json_path": str(input_path)})
-            sample_key = load_result["items"][0]["sample_key"]
+            page_result = server.api_page({"page": 1, "page_size": 20})
+            sample_key = page_result["items"][0]["sample_key"]
 
             result = server.api_label({"sample_key": sample_key, "human_label": "pass"})
 
             self.assertTrue(result["success"])
             self.assertEqual(result["label"]["human_label"], "pass")
+            self.assertEqual(result["next_unlabeled"]["sample_key"], page_result["items"][1]["sample_key"])
             self.assertEqual(result["stats"]["pass"], 1)
             self.assertEqual(result["stats"]["unlabeled"], 1)
             saved = json.loads(Path(load_result["progress_path"]).read_text(encoding="utf-8"))
@@ -286,9 +305,10 @@ class JsonLabelerBackendTests(unittest.TestCase):
             export_dir = Path(tmp) / "exports"
             records = [make_record(0), make_record(1), make_record(2)]
             input_path.write_text(json.dumps(records), encoding="utf-8")
-            load_result = server.api_load({"input_json_path": str(input_path)})
-            server.api_label({"sample_key": load_result["items"][0]["sample_key"], "human_label": "pass"})
-            server.api_label({"sample_key": load_result["items"][1]["sample_key"], "human_label": "fail"})
+            server.api_load({"input_json_path": str(input_path)})
+            page_result = server.api_page({"page": 1, "page_size": 20})
+            server.api_label({"sample_key": page_result["items"][0]["sample_key"], "human_label": "pass"})
+            server.api_label({"sample_key": page_result["items"][1]["sample_key"], "human_label": "fail"})
 
             result = server.api_export({
                 "export_dir": str(export_dir),
@@ -324,15 +344,17 @@ class JsonLabelerBackendTests(unittest.TestCase):
 
             load_a = server.api_load({"session_id": "alice", "input_json_path": str(input_a)})
             load_b = server.api_load({"session_id": "bob", "input_json_path": str(input_b)})
+            page_a = server.api_page({"session_id": "alice", "page": 1, "page_size": 20})
+            page_b = server.api_page({"session_id": "bob", "page": 1, "page_size": 20})
 
             server.api_label({
                 "session_id": "alice",
-                "sample_key": load_a["items"][0]["sample_key"],
+                "sample_key": page_a["items"][0]["sample_key"],
                 "human_label": "pass",
             })
             server.api_label({
                 "session_id": "bob",
-                "sample_key": load_b["items"][0]["sample_key"],
+                "sample_key": page_b["items"][0]["sample_key"],
                 "human_label": "fail",
             })
 
