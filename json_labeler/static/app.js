@@ -204,7 +204,9 @@ function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
   }
   return `<figure class="image-box ${extraClass}" data-view-id="${safeViewId}">
     <figcaption class="image-title">${safeTitle}</figcaption>
-    <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" style="${imageTransformStyle(viewId)}">
+    <div class="image-stage">
+      <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" style="${imageTransformStyle(viewId)}">
+    </div>
     <div class="image-path" title="${safePath}">${safePath}</div>
   </figure>`;
 }
