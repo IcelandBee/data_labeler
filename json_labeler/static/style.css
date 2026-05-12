@@ -260,8 +260,14 @@ input[readonly] {
   min-height: 0;
   object-fit: contain;
   background: #101418;
-  transform: scale(var(--zoom));
   transform-origin: center;
+  cursor: grab;
+  user-select: none;
+  will-change: transform;
+}
+
+.image-box img.dragging {
+  cursor: grabbing;
 }
 
 .image-path {
@@ -292,10 +298,6 @@ input[readonly] {
 
 .target-image {
   border-color: #b7c7df;
-}
-
-.target-image img {
-  cursor: pointer;
 }
 
 .prompt {

@@ -31,7 +31,8 @@ const state = {
   pageSize: storedPageSize(),
   selectedKey: "",
   hoverKey: "",
-  zoom: 1,
+  imageViews: {},
+  activePan: null,
 };
 
 const els = {};
@@ -169,19 +170,41 @@ function pageForKey(sampleKey) {
   return Math.floor(index / state.pageSize) + 1;
 }
 
-function imageBlock(title, path, url, error, extraClass = "") {
+function imageViewId(sampleKey, role) {
+  return `${sampleKey}:${role}`;
+}
+
+function getImageView(viewId) {
+  if (!state.imageViews[viewId]) {
+    state.imageViews[viewId] = { scale: 1, x: 0, y: 0 };
+  }
+  return state.imageViews[viewId];
+}
+
+function imageTransformStyle(viewId) {
+  const view = getImageView(viewId);
+  return `transform: translate3d(${view.x}px, ${view.y}px, 0) scale(${view.scale});`;
+}
+
+function applyImageViewToElement(viewId, img) {
+  img.style.transform = imageTransformStyle(viewId).replace("transform: ", "").replace(";", "");
+}
+
+function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
   const safeTitle = escapeHtml(title);
   const safePath = escapeHtml(path || "");
+  const viewId = imageViewId(sampleKey, role);
+  const safeViewId = escapeHtml(viewId);
   if (error || !url) {
-    return `<div class="image-box image-missing ${extraClass}">
+    return `<div class="image-box image-missing ${extraClass}" data-view-id="${safeViewId}">
       <div class="image-title">${safeTitle}</div>
       <div class="image-error">${escapeHtml(error || "image unavailable")}</div>
       <div class="image-path">${safePath}</div>
     </div>`;
   }
-  return `<figure class="image-box ${extraClass}">
+  return `<figure class="image-box ${extraClass}" data-view-id="${safeViewId}">
     <figcaption class="image-title">${safeTitle}</figcaption>
-    <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}">
+    <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" style="${imageTransformStyle(viewId)}">
     <div class="image-path" title="${safePath}">${safePath}</div>
   </figure>`;
 }
@@ -201,10 +224,10 @@ function renderCard(item) {
       <span class="sample-path" title="${escapeHtml(titlePath)}">${escapeHtml(titlePath || key)}</span>
       <span class="label-pill">${escapeHtml(label || "unlabeled")}</span>
     </header>
-    <div class="image-row" style="--zoom:${state.zoom}">
-      ${imageBlock("cond_1", item.source_path || item.cond_1, item.source, item.image_errors?.cond_1)}
-      ${imageBlock("cond_2", item.reference_path || item.cond_2, item.reference, item.image_errors?.cond_2)}
-      ${imageBlock("file_name", item.target_path || item.file_name, item.target, item.image_errors?.file_name, "target-image")}
+    <div class="image-row">
+      ${imageBlock("cond_1", item.source_path || item.cond_1, item.source, item.image_errors?.cond_1, key, "source")}
+      ${imageBlock("cond_2", item.reference_path || item.cond_2, item.reference, item.image_errors?.cond_2, key, "reference")}
+      ${imageBlock("file_name", item.target_path || item.file_name, item.target, item.image_errors?.file_name, key, "target", "target-image")}
     </div>
     <section class="prompt" aria-label="Prompt">${escapeHtml(prompt || "No prompt text")}</section>
     <footer class="actions">
@@ -353,34 +376,85 @@ async function exportData() {
   }
 }
 
-function onImageCompareStart(event) {
-  const targetBox = event.target.closest(".target-image");
-  if (!targetBox) return;
+function onImageMouseDown(event) {
+  if (event.button !== 0) return;
+  const imageBox = event.target.closest(".image-box");
+  const img = imageBox?.querySelector("img");
+  if (!imageBox || !img) return;
+
+  const card = event.target.closest(".sample-card");
+  if (card) {
+    state.selectedKey = card.dataset.key || "";
+  }
+
+  startImageCompare(event, imageBox, img);
+  const viewId = imageBox.dataset.viewId || "";
+  const view = getImageView(viewId);
+  state.activePan = {
+    viewId,
+    img,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: view.x,
+    originY: view.y,
+  };
+  img.classList.add("dragging");
+  event.preventDefault();
+}
+
+function startImageCompare(event, imageBox, img) {
+  if (!imageBox.classList.contains("target-image")) return;
 
   const card = event.target.closest(".sample-card");
   const item = state.items.find((candidate) => candidate.sample_key === card?.dataset.key);
-  const img = targetBox.querySelector("img");
   if (!img || !item?.source) return;
 
   img.dataset.targetSrc = img.src;
   img.src = item.source;
 }
 
-function onImageCompareEnd() {
+function onImageMouseMove(event) {
+  if (!state.activePan) return;
+  const view = getImageView(state.activePan.viewId);
+  view.x = state.activePan.originX + event.clientX - state.activePan.startX;
+  view.y = state.activePan.originY + event.clientY - state.activePan.startY;
+  applyImageViewToElement(state.activePan.viewId, state.activePan.img);
+  event.preventDefault();
+}
+
+function onImageMouseUp() {
+  if (state.activePan?.img) {
+    state.activePan.img.classList.remove("dragging");
+  }
+  state.activePan = null;
   els.content.querySelectorAll(".target-image img[data-target-src]").forEach((img) => {
     img.src = img.dataset.targetSrc;
     delete img.dataset.targetSrc;
   });
 }
 
-function zoomBy(delta) {
-  state.zoom = Math.min(3, Math.max(0.5, Number((state.zoom + delta).toFixed(2))));
-  render();
+function onImageWheel(event) {
+  const imageBox = event.target.closest(".image-box");
+  const img = imageBox?.querySelector("img");
+  if (!imageBox || !img) return;
+
+  const viewId = imageBox.dataset.viewId || "";
+  const view = getImageView(viewId);
+  const delta = event.deltaY < 0 ? 0.12 : -0.12;
+  view.scale = Math.min(6, Math.max(0.4, Number((view.scale + delta).toFixed(2))));
+  applyImageViewToElement(viewId, img);
+  event.preventDefault();
 }
 
-function resetZoom() {
-  state.zoom = 1;
-  render();
+function onImageDoubleClick(event) {
+  const imageBox = event.target.closest(".image-box");
+  const img = imageBox?.querySelector("img");
+  if (!imageBox || !img) return;
+
+  const viewId = imageBox.dataset.viewId || "";
+  state.imageViews[viewId] = { scale: 1, x: 0, y: 0 };
+  applyImageViewToElement(viewId, img);
+  event.preventDefault();
 }
 
 function isEditingText(event) {
@@ -410,15 +484,6 @@ function onKeyDown(event) {
   } else if (event.key.toLowerCase() === "c") {
     event.preventDefault();
     setLabel(activeKey(), "").catch((error) => showToast(error.message || "Label failed."));
-  } else if (event.key === "+" || event.key === "=") {
-    event.preventDefault();
-    zoomBy(0.1);
-  } else if (event.key === "-") {
-    event.preventDefault();
-    zoomBy(-0.1);
-  } else if (event.key === "0") {
-    event.preventDefault();
-    resetZoom();
   }
 }
 
@@ -435,12 +500,11 @@ function bindEvents() {
   els.content.addEventListener("click", onContentClick);
   els.content.addEventListener("mouseover", onContentHover);
   els.content.addEventListener("mouseout", onContentLeave);
-  els.content.addEventListener("mousedown", onImageCompareStart);
-  els.content.addEventListener("mouseup", onImageCompareEnd);
-  els.content.addEventListener("mouseleave", onImageCompareEnd);
-  els.content.addEventListener("touchstart", onImageCompareStart);
-  els.content.addEventListener("touchend", onImageCompareEnd);
-  els.content.addEventListener("touchcancel", onImageCompareEnd);
+  els.content.addEventListener("mousedown", onImageMouseDown);
+  els.content.addEventListener("wheel", onImageWheel, { passive: false });
+  els.content.addEventListener("dblclick", onImageDoubleClick);
+  document.addEventListener("mousemove", onImageMouseMove);
+  document.addEventListener("mouseup", onImageMouseUp);
   document.addEventListener("keydown", onKeyDown);
 }
 
