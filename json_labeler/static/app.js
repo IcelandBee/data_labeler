@@ -179,6 +179,11 @@ function mergeLabels(labels) {
   });
 }
 
+function resetImageViews() {
+  state.imageViews = {};
+  state.activePan = null;
+}
+
 async function fetchPage(page, preferredKey = "") {
   if (!state.loaded) {
     render();
@@ -197,6 +202,7 @@ async function fetchPage(page, preferredKey = "") {
   state.totalPages = data.total_pages || totalPages();
   state.pageSize = data.page_size || state.pageSize;
   els.pageSizeInput.value = String(state.pageSize);
+  resetImageViews();
 
   const hasPreferred = preferredKey && state.items.some((item) => item.sample_key === preferredKey);
   state.selectedKey = hasPreferred ? preferredKey : (firstUnlabeledOnPage() || state.items[0]?.sample_key || "");
