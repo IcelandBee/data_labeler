@@ -31,6 +31,7 @@ class JsonLabelerBackendTests(unittest.TestCase):
             "records": [],
             "sidecar": server.empty_sidecar(""),
         }
+        server.SESSIONS = {server.DEFAULT_SESSION_ID: server.STATE}
 
     def request_handler(self, method, path, body=None, headers=None):
         class QuietHandler(server.Handler):
@@ -309,6 +310,43 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail", ""])
             self.assertEqual([item["prompt"] for item in passed], ["Prompt 0"])
             self.assertEqual([item["prompt"] for item in failed], ["Prompt 1"])
+
+    def test_api_sessions_keep_different_loaded_datasets_isolated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_a = Path(tmp) / "input_a.json"
+            input_b = Path(tmp) / "input_b.json"
+            export_a = Path(tmp) / "export_a"
+            export_b = Path(tmp) / "export_b"
+            records_a = [make_record(0, "a")]
+            records_b = [make_record(0, "b")]
+            input_a.write_text(json.dumps(records_a), encoding="utf-8")
+            input_b.write_text(json.dumps(records_b), encoding="utf-8")
+
+            load_a = server.api_load({"session_id": "alice", "input_json_path": str(input_a)})
+            load_b = server.api_load({"session_id": "bob", "input_json_path": str(input_b)})
+
+            server.api_label({
+                "session_id": "alice",
+                "sample_key": load_a["items"][0]["sample_key"],
+                "human_label": "pass",
+            })
+            server.api_label({
+                "session_id": "bob",
+                "sample_key": load_b["items"][0]["sample_key"],
+                "human_label": "fail",
+            })
+
+            result_a = server.api_export({"session_id": "alice", "export_dir": str(export_a)})
+            result_b = server.api_export({"session_id": "bob", "export_dir": str(export_b)})
+
+            annotated_a = json.loads(Path(result_a["paths"]["annotated"]).read_text(encoding="utf-8"))
+            annotated_b = json.loads(Path(result_b["paths"]["annotated"]).read_text(encoding="utf-8"))
+            self.assertEqual(annotated_a[0]["prompt"], "Prompt 0")
+            self.assertEqual(annotated_a[0]["human_label"], "pass")
+            self.assertEqual(annotated_b[0]["prompt"], "Prompt 0")
+            self.assertEqual(annotated_b[0]["human_label"], "fail")
+            self.assertEqual(Path(result_a["paths"]["annotated"]).parent, export_a)
+            self.assertEqual(Path(result_b["paths"]["annotated"]).parent, export_b)
 
     def test_api_export_stages_all_payloads_before_promoting_final_files(self):
         with tempfile.TemporaryDirectory() as tmp:

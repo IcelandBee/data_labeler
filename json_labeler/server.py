@@ -32,6 +32,7 @@ ALLOWED_LABELS = {"", "pass", "fail"}
 DEFAULT_ANNOTATED_FILENAME = "annotated_all.json"
 DEFAULT_PASS_FILENAME = "accepted_pass.json"
 DEFAULT_FAIL_FILENAME = "rejected_fail.json"
+DEFAULT_SESSION_ID = "default"
 
 # 全局变量
 server_instance = None
@@ -297,7 +298,7 @@ def read_json_records(json_path):
     if not os.path.isfile(json_path):
         raise ValueError(f'Not a file: {json_path}')
 
-    with open(json_path, 'r', encoding='utf-8') as f:
+    with open(json_path, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
 
     if not isinstance(data, list):
@@ -497,7 +498,7 @@ def load_sidecar(sidecar_path, source_file=""):
         return empty_sidecar(source_file)
 
     try:
-        with open(sidecar_path, 'r', encoding='utf-8') as f:
+        with open(sidecar_path, 'r', encoding='utf-8-sig') as f:
             sidecar = json.load(f)
         if not isinstance(sidecar, dict) or not isinstance(sidecar.get('labels'), dict):
             raise ValueError('Invalid sidecar shape')
@@ -703,11 +704,35 @@ def build_export_payloads(records, labels):
     return annotated_all, passed, failed
 
 
-STATE = {"input_json_path": "", "sidecar_path": "", "records": [], "sidecar": empty_sidecar("")}
+def make_empty_state():
+    return {"input_json_path": "", "sidecar_path": "", "records": [], "sidecar": empty_sidecar("")}
 
 
-def _current_labels():
-    sidecar = STATE.get("sidecar") if isinstance(STATE, dict) else {}
+STATE = make_empty_state()
+SESSIONS = {DEFAULT_SESSION_ID: STATE}
+
+
+def _session_id_from_request(data):
+    if not isinstance(data, dict):
+        return DEFAULT_SESSION_ID
+    session_id = str(data.get("session_id", "")).strip()
+    return session_id or DEFAULT_SESSION_ID
+
+
+def _state_for_request(data):
+    session_id = _session_id_from_request(data)
+    if session_id == DEFAULT_SESSION_ID:
+        SESSIONS[DEFAULT_SESSION_ID] = STATE
+        return session_id, STATE
+    if session_id not in SESSIONS:
+        SESSIONS[session_id] = make_empty_state()
+    return session_id, SESSIONS[session_id]
+
+
+def _current_labels(state=None):
+    if state is None:
+        state = STATE
+    sidecar = state.get("sidecar") if isinstance(state, dict) else {}
     labels = sidecar.get("labels", {}) if isinstance(sidecar, dict) else {}
     if not isinstance(labels, dict):
         labels = {}
@@ -720,6 +745,7 @@ def _loaded_sample_keys(records):
 
 
 def api_load(data):
+    session_id, state = _state_for_request(data)
     input_json_path = safe_path(data.get("input_json_path") if isinstance(data, dict) else "")
     if not input_json_path:
         raise ValueError("input_json_path is required")
@@ -729,7 +755,7 @@ def api_load(data):
     sidecar = load_sidecar(sidecar_path, input_json_path)
     items, labels = build_items(records, sidecar)
 
-    STATE.update({
+    state.update({
         "input_json_path": input_json_path,
         "sidecar_path": sidecar_path,
         "records": records,
@@ -738,6 +764,7 @@ def api_load(data):
 
     return {
         "success": True,
+        "session_id": session_id,
         "items": items,
         "labels": labels,
         "progress_path": sidecar_path,
@@ -746,8 +773,9 @@ def api_load(data):
 
 
 def api_label(data):
-    records = STATE.get("records", [])
-    sidecar_path = STATE.get("sidecar_path", "")
+    session_id, state = _state_for_request(data)
+    records = state.get("records", [])
+    sidecar_path = state.get("sidecar_path", "")
     if not records or not sidecar_path:
         raise ValueError("No dataset loaded")
 
@@ -756,18 +784,20 @@ def api_label(data):
         raise ValueError("sample_key is not in the loaded dataset")
 
     human_label = data.get("human_label", "") if isinstance(data, dict) else ""
-    label = apply_label(_current_labels(), sample_key, human_label)
-    STATE["sidecar"] = save_sidecar(sidecar_path, STATE["sidecar"])
+    label = apply_label(_current_labels(state), sample_key, human_label)
+    state["sidecar"] = save_sidecar(sidecar_path, state["sidecar"])
     return {
         "success": True,
+        "session_id": session_id,
         "sample_key": sample_key,
         "label": label,
-        "stats": compute_stats(records, _current_labels()),
+        "stats": compute_stats(records, _current_labels(state)),
     }
 
 
 def api_export(data):
-    records = STATE.get("records", [])
+    session_id, state = _state_for_request(data)
+    records = state.get("records", [])
     if not records:
         raise ValueError("No dataset loaded")
 
@@ -780,7 +810,7 @@ def api_export(data):
         data.get("pass_filename", DEFAULT_PASS_FILENAME),
         data.get("fail_filename", DEFAULT_FAIL_FILENAME),
     )
-    annotated, passed, failed = build_export_payloads(records, _current_labels())
+    annotated, passed, failed = build_export_payloads(records, _current_labels(state))
     paths = {
         "annotated": os.path.normpath(os.path.join(export_dir, annotated_name)),
         "pass": os.path.normpath(os.path.join(export_dir, pass_name)),
@@ -868,6 +898,7 @@ def api_export(data):
 
     return {
         "success": True,
+        "session_id": session_id,
         "paths": paths,
         "counts": {
             "annotated": len(annotated),
@@ -989,7 +1020,7 @@ def signal_handler(sig, frame):
     os._exit(0)
 
 
-def start_server(port):
+def start_server(port, host=None):
     global server_instance
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -997,7 +1028,7 @@ def start_server(port):
 
     socketserver.TCPServer.allow_reuse_address = True
 
-    bind_host = get_default_bind_host()
+    bind_host = host or get_default_bind_host()
 
     try:
         server_instance = socketserver.TCPServer((bind_host, port), Handler)
@@ -1050,6 +1081,7 @@ def stop_server(port):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='图片评测服务器')
     parser.add_argument('-p', '--port', type=int, default=DEFAULT_PORT, help=f'端口 (默认: {DEFAULT_PORT})')
+    parser.add_argument('--host', default=None, help='监听地址，例如 0.0.0.0 可供局域网访问')
     parser.add_argument('--stop', action='store_true', help='停止服务器')
 
     args = parser.parse_args()
@@ -1057,4 +1089,4 @@ if __name__ == '__main__':
     if args.stop:
         stop_server(args.port)
     else:
-        start_server(args.port)
+        start_server(args.port, args.host)

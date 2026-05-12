@@ -1,4 +1,21 @@
 const PAGE_SIZE_KEY = "jsonLabeler.pageSize";
+const SESSION_KEY = "jsonLabeler.sessionId";
+
+function createSessionId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function storedSessionId() {
+  let sessionId = sessionStorage.getItem(SESSION_KEY);
+  if (!sessionId) {
+    sessionId = createSessionId();
+    sessionStorage.setItem(SESSION_KEY, sessionId);
+  }
+  return sessionId;
+}
 
 function storedPageSize() {
   const value = Number(localStorage.getItem(PAGE_SIZE_KEY)) || 20;
@@ -6,6 +23,7 @@ function storedPageSize() {
 }
 
 const state = {
+  sessionId: storedSessionId(),
   items: [],
   labels: {},
   stats: { total: 0, labeled: 0, pass: 0, fail: 0, unlabeled: 0 },
@@ -44,10 +62,14 @@ function initElements() {
 }
 
 async function postJson(url, payload) {
+  const body = {
+    ...(payload || {}),
+    session_id: state.sessionId,
+  };
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.success === false) {
@@ -88,6 +110,10 @@ async function loadData() {
     state.items = Array.isArray(data.items) ? data.items : [];
     state.labels = data.labels && typeof data.labels === "object" ? data.labels : {};
     state.stats = data.stats || state.stats;
+    if (data.session_id) {
+      state.sessionId = data.session_id;
+      sessionStorage.setItem(SESSION_KEY, state.sessionId);
+    }
     state.selectedKey = firstUnlabeledKey() || state.items[0]?.sample_key || "";
     state.currentPage = state.selectedKey ? pageForKey(state.selectedKey) : 1;
     state.hoverKey = "";
