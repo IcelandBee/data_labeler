@@ -686,19 +686,27 @@ def build_export_payloads(records, labels):
         entry = labels.get(sample_key, {})
         human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
 
-        if isinstance(record, dict):
-            annotated = copy.deepcopy(record)
-            annotated['human_label'] = human_label
-        else:
-            annotated = {
-                '_invalid_record': copy.deepcopy(record),
-                'human_label': human_label,
-            }
-        annotated_all.append(annotated)
-
         if human_label == 'pass':
+            if isinstance(record, dict):
+                annotated = copy.deepcopy(record)
+                annotated['human_label'] = human_label
+            else:
+                annotated = {
+                    '_invalid_record': copy.deepcopy(record),
+                    'human_label': human_label,
+                }
+            annotated_all.append(annotated)
             passed.append(copy.deepcopy(record))
         elif human_label == 'fail':
+            if isinstance(record, dict):
+                annotated = copy.deepcopy(record)
+                annotated['human_label'] = human_label
+            else:
+                annotated = {
+                    '_invalid_record': copy.deepcopy(record),
+                    'human_label': human_label,
+                }
+            annotated_all.append(annotated)
             failed.append(copy.deepcopy(record))
 
     return annotated_all, passed, failed

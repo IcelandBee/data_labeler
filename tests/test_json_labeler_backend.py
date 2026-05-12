@@ -213,7 +213,7 @@ class JsonLabelerBackendTests(unittest.TestCase):
             server.make_sample_key(records[1]): {"human_label": "fail"},
         }
         annotated, passed, failed = server.build_export_payloads(records, labels)
-        self.assertEqual([x["human_label"] for x in annotated], ["pass", "fail", ""])
+        self.assertEqual([x["human_label"] for x in annotated], ["pass", "fail"])
         self.assertNotIn("human_label", passed[0])
         self.assertNotIn("human_label", failed[0])
         self.assertEqual([x["prompt"] for x in passed], ["Prompt 0"])
@@ -298,7 +298,7 @@ class JsonLabelerBackendTests(unittest.TestCase):
             })
 
             self.assertTrue(result["success"])
-            self.assertEqual(result["counts"], {"annotated": 3, "pass": 1, "fail": 1})
+            self.assertEqual(result["counts"], {"annotated": 2, "pass": 1, "fail": 1})
             self.assertEqual(set(Path(path).name for path in result["paths"].values()), {
                 "annotated_all.json",
                 "kept.json",
@@ -307,7 +307,7 @@ class JsonLabelerBackendTests(unittest.TestCase):
             annotated = json.loads((export_dir / "annotated_all.json").read_text(encoding="utf-8"))
             passed = json.loads((export_dir / "kept.json").read_text(encoding="utf-8"))
             failed = json.loads((export_dir / "bad_ones.json").read_text(encoding="utf-8"))
-            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail", ""])
+            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail"])
             self.assertEqual([item["prompt"] for item in passed], ["Prompt 0"])
             self.assertEqual([item["prompt"] for item in failed], ["Prompt 1"])
 
