@@ -240,8 +240,8 @@ function onContentClick(event) {
 
   const button = event.target.closest("button[data-action='label']");
   if (button) {
-    showToast("Label actions will be enabled in Task 5.");
-    render();
+    setLabel(button.dataset.key || "", button.dataset.label || "")
+      .catch((error) => showToast(error.message || "Label failed."));
     return;
   }
 
@@ -260,9 +260,145 @@ function onContentLeave(event) {
   state.hoverKey = "";
 }
 
+function activeKey() {
+  return state.hoverKey || state.selectedKey || currentPageItems()[0]?.sample_key || "";
+}
+
+async function setLabel(sampleKey, humanLabel) {
+  if (!sampleKey) {
+    showToast("No sample selected.");
+    return;
+  }
+
+  const data = await postJson("/api/label", {
+    sample_key: sampleKey,
+    human_label: humanLabel,
+  });
+
+  state.labels[sampleKey] = data.label || { human_label: humanLabel };
+  state.stats = data.stats || state.stats;
+
+  if (humanLabel) {
+    advanceAfterLabel(sampleKey);
+  } else {
+    state.selectedKey = sampleKey;
+  }
+
+  render();
+  showToast(humanLabel ? `Saved ${humanLabel}.` : "Label cleared.");
+}
+
+function advanceAfterLabel(sampleKey) {
+  const start = Math.max(0, state.items.findIndex((item) => item.sample_key === sampleKey));
+  for (let offset = 1; offset <= state.items.length; offset += 1) {
+    const index = (start + offset) % state.items.length;
+    const item = state.items[index];
+    const label = state.labels[item.sample_key]?.human_label || "";
+    if (!label) {
+      state.selectedKey = item.sample_key;
+      state.currentPage = pageForKey(item.sample_key);
+      return;
+    }
+  }
+  state.selectedKey = sampleKey;
+}
+
+async function exportData() {
+  const exportDir = els.exportDir.value.trim();
+  if (!exportDir) {
+    showToast("Enter an export directory first.");
+    return;
+  }
+
+  els.exportBtn.disabled = true;
+  els.exportBtn.textContent = "Exporting...";
+  try {
+    const data = await postJson("/api/export", {
+      export_dir: exportDir,
+      annotated_filename: els.annotatedFilename.value.trim(),
+      pass_filename: els.acceptedFilename.value.trim(),
+      fail_filename: els.rejectedFilename.value.trim(),
+    });
+    const counts = data.counts || {};
+    showToast(`Exported all ${counts.annotated || 0}, pass ${counts.pass || 0}, fail ${counts.fail || 0}.`);
+  } finally {
+    els.exportBtn.disabled = false;
+    els.exportBtn.textContent = "Export";
+  }
+}
+
+function onImageCompareStart(event) {
+  const targetBox = event.target.closest(".target-image");
+  if (!targetBox) return;
+
+  const card = event.target.closest(".sample-card");
+  const item = state.items.find((candidate) => candidate.sample_key === card?.dataset.key);
+  const img = targetBox.querySelector("img");
+  if (!img || !item?.source) return;
+
+  img.dataset.targetSrc = img.src;
+  img.src = item.source;
+}
+
+function onImageCompareEnd() {
+  els.content.querySelectorAll(".target-image img[data-target-src]").forEach((img) => {
+    img.src = img.dataset.targetSrc;
+    delete img.dataset.targetSrc;
+  });
+}
+
+function zoomBy(delta) {
+  state.zoom = Math.min(3, Math.max(0.5, Number((state.zoom + delta).toFixed(2))));
+  render();
+}
+
+function resetZoom() {
+  state.zoom = 1;
+  render();
+}
+
+function isEditingText(event) {
+  const target = event.target;
+  if (!target) return false;
+  return target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable;
+}
+
+function onKeyDown(event) {
+  if (isEditingText(event)) return;
+
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    prevPage();
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    nextPage();
+  } else if (event.key.toLowerCase() === "a") {
+    event.preventDefault();
+    setLabel(activeKey(), "pass").catch((error) => showToast(error.message || "Label failed."));
+  } else if (event.key.toLowerCase() === "d") {
+    event.preventDefault();
+    setLabel(activeKey(), "fail").catch((error) => showToast(error.message || "Label failed."));
+  } else if (event.key.toLowerCase() === "c") {
+    event.preventDefault();
+    setLabel(activeKey(), "").catch((error) => showToast(error.message || "Label failed."));
+  } else if (event.key === "+" || event.key === "=") {
+    event.preventDefault();
+    zoomBy(0.1);
+  } else if (event.key === "-") {
+    event.preventDefault();
+    zoomBy(-0.1);
+  } else if (event.key === "0") {
+    event.preventDefault();
+    resetZoom();
+  }
+}
+
 function bindEvents() {
   els.loadBtn.addEventListener("click", loadData);
-  els.exportBtn.addEventListener("click", () => showToast("Export will be enabled in a later task."));
+  els.exportBtn.addEventListener("click", () => exportData().catch((error) => showToast(error.message || "Export failed.")));
   els.prevBtn.addEventListener("click", prevPage);
   els.nextBtn.addEventListener("click", nextPage);
   els.jumpBtn.addEventListener("click", jumpPage);
@@ -273,6 +409,13 @@ function bindEvents() {
   els.content.addEventListener("click", onContentClick);
   els.content.addEventListener("mouseover", onContentHover);
   els.content.addEventListener("mouseout", onContentLeave);
+  els.content.addEventListener("mousedown", onImageCompareStart);
+  els.content.addEventListener("mouseup", onImageCompareEnd);
+  els.content.addEventListener("mouseleave", onImageCompareEnd);
+  els.content.addEventListener("touchstart", onImageCompareStart);
+  els.content.addEventListener("touchend", onImageCompareEnd);
+  els.content.addEventListener("touchcancel", onImageCompareEnd);
+  document.addEventListener("keydown", onKeyDown);
 }
 
 initElements();

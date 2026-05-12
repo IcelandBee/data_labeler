@@ -20,6 +20,7 @@ import sys
 import argparse
 import signal
 import tempfile
+import threading
 import time
 import socket
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -267,7 +268,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         print('[INFO] 收到关闭请求')
         sys.stdout.flush()
         if server_instance:
-            server_instance.shutdown()
+            threading.Thread(target=server_instance.shutdown, daemon=True).start()
             server_instance = None
 
 

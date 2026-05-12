@@ -244,6 +244,7 @@ input[readonly] {
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #f8fafc;
+  overflow: hidden;
 }
 
 .image-title {
@@ -293,6 +294,10 @@ input[readonly] {
   border-color: #b7c7df;
 }
 
+.target-image img {
+  cursor: pointer;
+}
+
 .prompt {
   max-height: 96px;
   overflow: auto;
@@ -317,6 +322,18 @@ input[readonly] {
 .actions button[data-label="fail"] {
   border-color: #deb0ab;
   color: var(--fail);
+}
+
+.label-pass .actions button[data-label="pass"] {
+  background: var(--pass-bg);
+  border-color: var(--pass);
+  font-weight: 700;
+}
+
+.label-fail .actions button[data-label="fail"] {
+  background: var(--fail-bg);
+  border-color: var(--fail);
+  font-weight: 700;
 }
 
 .toast {
