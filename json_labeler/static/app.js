@@ -1,4 +1,5 @@
 const PAGE_SIZE_KEY = "jsonLabeler.pageSize";
+const IMAGES_PER_ROW_KEY = "jsonLabeler.imagesPerRow";
 const SESSION_KEY = "jsonLabeler.sessionId";
 
 function createSessionId() {
@@ -22,6 +23,11 @@ function storedPageSize() {
   return Math.min(Math.max(1, Math.floor(value)), 200);
 }
 
+function storedImagesPerRow() {
+  const value = Number(localStorage.getItem(IMAGES_PER_ROW_KEY)) || 4;
+  return Math.min(Math.max(1, Math.floor(value)), 8);
+}
+
 const state = {
   sessionId: storedSessionId(),
   groups: [],
@@ -39,6 +45,7 @@ const state = {
   currentPage: 1,
   totalPages: 1,
   pageSize: storedPageSize(),
+  imagesPerRow: storedImagesPerRow(),
   selectedKey: "",
   hoverKey: "",
   imageViews: {},
@@ -62,6 +69,7 @@ function initElements() {
     exportBtn: document.querySelector("#exportBtn"),
     statsText: document.querySelector("#statsText"),
     pageSizeInput: document.querySelector("#pageSizeInput"),
+    imagesPerRowInput: document.querySelector("#imagesPerRowInput"),
     prevBtn: document.querySelector("#prevBtn"),
     pageText: document.querySelector("#pageText"),
     nextBtn: document.querySelector("#nextBtn"),
@@ -72,6 +80,7 @@ function initElements() {
   });
 
   els.pageSizeInput.value = String(state.pageSize);
+  els.imagesPerRowInput.value = String(state.imagesPerRow);
 }
 
 async function postJson(url, payload) {
@@ -283,6 +292,12 @@ function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
   </figure>`;
 }
 
+function renderSharedImageCard(group, title, path, url, error, role) {
+  return `<article class="shared-image-card">
+    ${imageBlock(title, path, url, error, group.group_key || "", role)}
+  </article>`;
+}
+
 function renderTargetCard(group, target) {
   const key = target.sample_key || "";
   const label = state.labels[key]?.human_label || "";
@@ -315,19 +330,17 @@ function renderGroupCard(group) {
     ? ""
     : `<div class="group-warning">No target image matched ${escapeHtml(group.basename || "this record")}.</div>`;
 
-  return `<section class="group-card${reviewed ? " reviewed" : ""}" data-group-key="${escapeHtml(group.group_key || "")}">
+  return `<section class="group-card${reviewed ? " reviewed" : ""}" data-group-key="${escapeHtml(group.group_key || "")}" style="--images-per-row: ${state.imagesPerRow};">
     <header class="group-header">
       <strong>#${Number(group.index || 0) + 1}</strong>
       <span class="sample-path" title="${escapeHtml(group.basename || "")}">${escapeHtml(group.basename || group.group_key || "")}</span>
       <span class="label-pill">${reviewed ? "reviewed" : "unreviewed"}</span>
     </header>
-    <div class="shared-row">
-      ${imageBlock("cond_1", group.source_path || "", group.source, group.image_errors?.cond_1, group.group_key || "", "source")}
-      ${imageBlock("cond_2", group.reference_path || "", group.reference, group.image_errors?.cond_2, group.group_key || "", "reference")}
-    </div>
     <section class="prompt" aria-label="Prompt">${escapeHtml(prompt || "No prompt text")}</section>
     ${warning}
-    <div class="target-grid">
+    <div class="image-grid">
+      ${renderSharedImageCard(group, "cond_1", group.source_path || "", group.source, group.image_errors?.cond_1, "source")}
+      ${renderSharedImageCard(group, "cond_2", group.reference_path || "", group.reference, group.image_errors?.cond_2, "reference")}
       ${targets.map((target) => renderTargetCard(group, target)).join("")}
     </div>
   </section>`;
@@ -373,6 +386,14 @@ async function changePageSize() {
   localStorage.setItem(PAGE_SIZE_KEY, String(nextSize));
   els.pageSizeInput.value = String(nextSize);
   await fetchPage(pageForIndex(indexToKeep), keyToKeep);
+}
+
+function changeImagesPerRow() {
+  const nextValue = Math.min(Math.max(1, Number(els.imagesPerRowInput.value) || 4), 8);
+  state.imagesPerRow = nextValue;
+  localStorage.setItem(IMAGES_PER_ROW_KEY, String(nextValue));
+  els.imagesPerRowInput.value = String(nextValue);
+  render();
 }
 
 function onContentClick(event) {
@@ -577,6 +598,7 @@ function bindEvents() {
     if (event.key === "Enter") jumpPage().catch((error) => showToast(error.message || "Page load failed."));
   });
   els.pageSizeInput.addEventListener("change", () => changePageSize().catch((error) => showToast(error.message || "Page load failed.")));
+  els.imagesPerRowInput.addEventListener("change", changeImagesPerRow);
   els.content.addEventListener("click", onContentClick);
   els.content.addEventListener("mouseover", onContentHover);
   els.content.addEventListener("mouseout", onContentLeave);

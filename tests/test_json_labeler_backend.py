@@ -709,6 +709,20 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertIn("application/json", dict(headers).get("Content-Type", ""))
             self.assertFalse(json.loads(body.decode("utf-8"))["success"])
 
+    def test_images_per_row_ui_wiring_is_present(self):
+        root = Path(__file__).resolve().parents[1]
+        index_html = (root / "json_labeler" / "index.html").read_text(encoding="utf-8")
+        app_js = (root / "json_labeler" / "static" / "app.js").read_text(encoding="utf-8")
+        style_css = (root / "json_labeler" / "static" / "style.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="imagesPerRowInput"', index_html)
+        self.assertIn("jsonLabeler.imagesPerRow", app_js)
+        self.assertIn("function changeImagesPerRow", app_js)
+        self.assertIn("image-grid", app_js)
+        self.assertIn("--images-per-row", app_js)
+        self.assertIn(".image-grid", style_css)
+        self.assertIn("var(--images-per-row)", style_css)
+
 
 if __name__ == "__main__":
     unittest.main()

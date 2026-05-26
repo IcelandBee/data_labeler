@@ -220,18 +220,13 @@ textarea {
   min-width: 0;
 }
 
-.shared-row {
+.image-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--images-per-row), minmax(0, 1fr));
   gap: 10px;
 }
 
-.target-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 10px;
-}
-
+.shared-image-card,
 .target-card {
   display: grid;
   gap: 8px;
@@ -485,11 +480,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .shared-row,
-  .target-grid {
-    grid-template-columns: 1fr;
-  }
-
   .image-box {
     grid-template-rows: auto minmax(220px, 44vh) auto;
   }
@@ -519,6 +509,10 @@ textarea {
 
   .compact-field {
     width: 100%;
+  }
+
+  .image-grid {
+    grid-template-columns: 1fr;
   }
 
   #pageText {
