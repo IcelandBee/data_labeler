@@ -13,6 +13,10 @@
         <span>Input JSON Path</span>
         <input id="inputJsonPath" type="text" autocomplete="off" spellcheck="false" placeholder="D:\path\to\samples.json">
       </label>
+      <label class="field target-dirs-field">
+        <span>Target Directories</span>
+        <textarea id="targetDirs" autocomplete="off" spellcheck="false" placeholder="Optional: one target directory per line"></textarea>
+      </label>
       <button id="loadBtn" type="button">Load/Resume</button>
     </section>
 
@@ -45,7 +49,7 @@
 
     <section class="statusbar" aria-label="Dataset status">
       <div class="status-left">
-        <output id="statsText">Total 0 | Labeled 0 | Pass 0 | Fail 0 | Unlabeled 0</output>
+        <output id="statsText">Groups 0 | Reviewed 0 | Unreviewed 0 | Targets 0 | Pass 0 | Fail 0 | Unlabeled-as-fail 0</output>
         <span class="shortcut-help">Keys: A pass | D fail | C clear | Left/Right page | Wheel zoom | Double-click reset</span>
       </div>
       <div class="pager" aria-label="Pagination">

@@ -24,9 +24,18 @@ function storedPageSize() {
 
 const state = {
   sessionId: storedSessionId(),
-  items: [],
+  groups: [],
   labels: {},
-  stats: { total: 0, labeled: 0, pass: 0, fail: 0, unlabeled: 0 },
+  groupProgress: {},
+  stats: {
+    groups_total: 0,
+    groups_reviewed: 0,
+    groups_unreviewed: 0,
+    targets_total: 0,
+    pass: 0,
+    fail: 0,
+    unlabeled_as_fail: 0,
+  },
   currentPage: 1,
   totalPages: 1,
   pageSize: storedPageSize(),
@@ -43,6 +52,7 @@ let toastTimer = 0;
 function initElements() {
   Object.assign(els, {
     inputJsonPath: document.querySelector("#inputJsonPath"),
+    targetDirs: document.querySelector("#targetDirs"),
     loadBtn: document.querySelector("#loadBtn"),
     progressPath: document.querySelector("#progressPath"),
     exportDir: document.querySelector("#exportDir"),
@@ -99,6 +109,13 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function targetDirsFromInput() {
+  return els.targetDirs.value
+    .split(/[\n,;]+/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 async function loadData() {
   const inputJsonPath = els.inputJsonPath.value.trim();
   if (!inputJsonPath) {
@@ -109,22 +126,26 @@ async function loadData() {
   els.loadBtn.disabled = true;
   els.loadBtn.textContent = "Loading...";
   try {
-    const data = await postJson("/api/load", { input_json_path: inputJsonPath });
-    state.items = [];
+    const data = await postJson("/api/load", {
+      input_json_path: inputJsonPath,
+      target_dirs: targetDirsFromInput(),
+    });
+    state.groups = [];
     state.labels = data.labels && typeof data.labels === "object" ? data.labels : {};
+    state.groupProgress = data.group_progress && typeof data.group_progress === "object" ? data.group_progress : {};
     state.stats = data.stats || state.stats;
     state.loaded = true;
     if (data.session_id) {
       state.sessionId = data.session_id;
       sessionStorage.setItem(SESSION_KEY, state.sessionId);
     }
-    const firstUnlabeled = data.first_unlabeled || null;
-    state.currentPage = firstUnlabeled ? pageForIndex(firstUnlabeled.index) : 1;
-    state.selectedKey = firstUnlabeled?.sample_key || "";
+    const firstGroup = data.first_unreviewed_group || null;
+    state.currentPage = firstGroup ? pageForIndex(firstGroup.index) : 1;
+    state.selectedKey = "";
     state.hoverKey = "";
     els.progressPath.value = data.progress_path || "Not loaded";
     await fetchPage(state.currentPage, state.selectedKey);
-    showToast(`Loaded ${state.stats.total || 0} samples.`);
+    showToast(`Loaded ${state.stats.groups_total || 0} groups.`);
   } catch (error) {
     showToast(error.message || "Load failed.");
   } finally {
@@ -134,7 +155,8 @@ async function loadData() {
 }
 
 function totalPages() {
-  return Math.max(1, state.totalPages || Math.ceil((state.stats.total || 0) / state.pageSize));
+  const total = state.stats.groups_total || 0;
+  return Math.max(1, state.totalPages || Math.ceil(total / state.pageSize));
 }
 
 function clampPage() {
@@ -144,27 +166,29 @@ function clampPage() {
 function updateStats(stats = state.stats) {
   state.stats = stats || state.stats;
   els.statsText.textContent =
-    `Total ${state.stats.total || 0} | ` +
-    `Labeled ${state.stats.labeled || 0} | ` +
+    `Groups ${state.stats.groups_total || 0} | ` +
+    `Reviewed ${state.stats.groups_reviewed || 0} | ` +
+    `Unreviewed ${state.stats.groups_unreviewed || 0} | ` +
+    `Targets ${state.stats.targets_total || 0} | ` +
     `Pass ${state.stats.pass || 0} | ` +
     `Fail ${state.stats.fail || 0} | ` +
-    `Unlabeled ${state.stats.unlabeled || 0}`;
+    `Unlabeled-as-fail ${state.stats.unlabeled_as_fail || 0}`;
   els.pageText.textContent = `Page ${state.currentPage} / ${totalPages()}`;
   els.pageJumpInput.value = String(state.currentPage);
   els.prevBtn.disabled = state.currentPage <= 1;
   els.nextBtn.disabled = state.currentPage >= totalPages();
 }
 
-function currentPageItems() {
-  return state.items;
+function currentPageGroups() {
+  return state.groups;
 }
 
-function firstUnlabeledOnPage() {
-  const item = state.items.find((candidate) => {
-    const label = state.labels[candidate.sample_key]?.human_label || "";
-    return label === "";
-  });
-  return item?.sample_key || "";
+function firstVisibleTargetKey() {
+  for (const group of state.groups) {
+    const target = (group.targets || [])[0];
+    if (target?.sample_key) return target.sample_key;
+  }
+  return "";
 }
 
 function pageForIndex(index) {
@@ -177,6 +201,11 @@ function mergeLabels(labels) {
   Object.entries(labels).forEach(([key, value]) => {
     state.labels[key] = value;
   });
+}
+
+function mergeGroupProgress(groupProgress) {
+  if (!groupProgress || typeof groupProgress !== "object") return;
+  state.groupProgress = { ...state.groupProgress, ...groupProgress };
 }
 
 function resetImageViews() {
@@ -195,8 +224,9 @@ async function fetchPage(page, preferredKey = "") {
     page,
     page_size: state.pageSize,
   });
-  state.items = Array.isArray(data.items) ? data.items : [];
+  state.groups = Array.isArray(data.groups) ? data.groups : [];
   mergeLabels(data.labels);
+  mergeGroupProgress(data.group_progress);
   state.stats = data.stats || state.stats;
   state.currentPage = data.page || page;
   state.totalPages = data.total_pages || totalPages();
@@ -204,8 +234,10 @@ async function fetchPage(page, preferredKey = "") {
   els.pageSizeInput.value = String(state.pageSize);
   resetImageViews();
 
-  const hasPreferred = preferredKey && state.items.some((item) => item.sample_key === preferredKey);
-  state.selectedKey = hasPreferred ? preferredKey : (firstUnlabeledOnPage() || state.items[0]?.sample_key || "");
+  const hasPreferred = preferredKey && state.groups.some((group) =>
+    (group.targets || []).some((target) => target.sample_key === preferredKey)
+  );
+  state.selectedKey = hasPreferred ? preferredKey : firstVisibleTargetKey();
   state.hoverKey = "";
   render();
 }
@@ -251,27 +283,22 @@ function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
   </figure>`;
 }
 
-function renderCard(item) {
-  const key = item.sample_key || "";
+function renderTargetCard(group, target) {
+  const key = target.sample_key || "";
   const label = state.labels[key]?.human_label || "";
   const selected = key === state.selectedKey ? " selected" : "";
   const hovered = key === state.hoverKey ? " hovered" : "";
   const labelClass = label ? ` label-${label}` : "";
-  const prompt = item.prompt || item.text_prompt || item.caption || "";
-  const titlePath = item.target_path || item.file_name || "";
+  const titlePath = target.target_path || target.file_name || "";
+  const title = target.target_dir_name || `Target ${Number(target.target_index || 0) + 1}`;
 
-  return `<article class="sample-card${selected}${hovered}${labelClass}" data-key="${escapeHtml(key)}">
-    <header class="card-header">
-      <strong>#${Number(item.index || 0) + 1}</strong>
+  return `<article class="target-card${selected}${hovered}${labelClass}" data-key="${escapeHtml(key)}" data-group-key="${escapeHtml(group.group_key || "")}">
+    <header class="target-header">
+      <strong>${escapeHtml(title)}</strong>
       <span class="sample-path" title="${escapeHtml(titlePath)}">${escapeHtml(titlePath || key)}</span>
       <span class="label-pill">${escapeHtml(label || "unlabeled")}</span>
     </header>
-    <div class="image-row">
-      ${imageBlock("cond_1", item.source_path || item.cond_1, item.source, item.image_errors?.cond_1, key, "source")}
-      ${imageBlock("cond_2", item.reference_path || item.cond_2, item.reference, item.image_errors?.cond_2, key, "reference")}
-      ${imageBlock("file_name", item.target_path || item.file_name, item.target, item.image_errors?.file_name, key, "target", "target-image")}
-    </div>
-    <section class="prompt" aria-label="Prompt">${escapeHtml(prompt || "No prompt text")}</section>
+    ${imageBlock("file_name", target.target_path || target.file_name, target.target, target.image_errors?.file_name, key, "target", "target-image")}
     <footer class="actions">
       <button type="button" data-action="label" data-label="pass" data-key="${escapeHtml(key)}">Pass</button>
       <button type="button" data-action="label" data-label="fail" data-key="${escapeHtml(key)}">Fail</button>
@@ -280,17 +307,43 @@ function renderCard(item) {
   </article>`;
 }
 
+function renderGroupCard(group) {
+  const reviewed = state.groupProgress[group.group_key]?.reviewed === true;
+  const prompt = group.prompt || "";
+  const targets = Array.isArray(group.targets) ? group.targets : [];
+  const warning = targets.length
+    ? ""
+    : `<div class="group-warning">No target image matched ${escapeHtml(group.basename || "this record")}.</div>`;
+
+  return `<section class="group-card${reviewed ? " reviewed" : ""}" data-group-key="${escapeHtml(group.group_key || "")}">
+    <header class="group-header">
+      <strong>#${Number(group.index || 0) + 1}</strong>
+      <span class="sample-path" title="${escapeHtml(group.basename || "")}">${escapeHtml(group.basename || group.group_key || "")}</span>
+      <span class="label-pill">${reviewed ? "reviewed" : "unreviewed"}</span>
+    </header>
+    <div class="shared-row">
+      ${imageBlock("cond_1", group.source_path || "", group.source, group.image_errors?.cond_1, group.group_key || "", "source")}
+      ${imageBlock("cond_2", group.reference_path || "", group.reference, group.image_errors?.cond_2, group.group_key || "", "reference")}
+    </div>
+    <section class="prompt" aria-label="Prompt">${escapeHtml(prompt || "No prompt text")}</section>
+    ${warning}
+    <div class="target-grid">
+      ${targets.map((target) => renderTargetCard(group, target)).join("")}
+    </div>
+  </section>`;
+}
+
 function render() {
   clampPage();
-  const items = currentPageItems();
-  els.content.innerHTML = items.length
-    ? items.map(renderCard).join("")
+  const groups = currentPageGroups();
+  els.content.innerHTML = groups.length
+    ? groups.map(renderGroupCard).join("")
     : `<section class="empty-state">Load a JSON file to begin labeling.</section>`;
   updateStats();
 }
 
 function selectFirstVisible() {
-  state.selectedKey = currentPageItems()[0]?.sample_key || "";
+  state.selectedKey = firstVisibleTargetKey();
 }
 
 async function prevPage() {
@@ -310,9 +363,11 @@ async function jumpPage() {
 }
 
 async function changePageSize() {
-  const selectedItem = state.items.find((item) => item.sample_key === state.selectedKey);
-  const indexToKeep = selectedItem?.index ?? ((state.currentPage - 1) * state.pageSize);
-  const keyToKeep = selectedItem?.sample_key || "";
+  const selectedGroup = state.groups.find((group) =>
+    (group.targets || []).some((target) => target.sample_key === state.selectedKey)
+  );
+  const indexToKeep = selectedGroup?.index ?? ((state.currentPage - 1) * state.pageSize);
+  const keyToKeep = state.selectedKey || "";
   const nextSize = Math.min(Math.max(1, Number(els.pageSizeInput.value) || 20), 200);
   state.pageSize = nextSize;
   localStorage.setItem(PAGE_SIZE_KEY, String(nextSize));
@@ -321,7 +376,7 @@ async function changePageSize() {
 }
 
 function onContentClick(event) {
-  const card = event.target.closest(".sample-card");
+  const card = event.target.closest(".target-card");
   if (card) state.selectedKey = card.dataset.key || "";
 
   const button = event.target.closest("button[data-action='label']");
@@ -335,7 +390,7 @@ function onContentClick(event) {
 }
 
 function onContentHover(event) {
-  const card = event.target.closest(".sample-card");
+  const card = event.target.closest(".target-card");
   if (!card || state.hoverKey === card.dataset.key) return;
   state.hoverKey = card.dataset.key || "";
 }
@@ -347,12 +402,12 @@ function onContentLeave(event) {
 }
 
 function activeKey() {
-  return state.hoverKey || state.selectedKey || currentPageItems()[0]?.sample_key || "";
+  return state.hoverKey || state.selectedKey || firstVisibleTargetKey();
 }
 
 async function setLabel(sampleKey, humanLabel) {
   if (!sampleKey) {
-    showToast("No sample selected.");
+    showToast("No target selected.");
     return;
   }
 
@@ -362,18 +417,9 @@ async function setLabel(sampleKey, humanLabel) {
   });
 
   state.labels[sampleKey] = data.label || { human_label: humanLabel };
+  state.groupProgress = data.group_progress || state.groupProgress;
   state.stats = data.stats || state.stats;
-
-  if (humanLabel && data.next_unlabeled) {
-    await fetchPage(pageForIndex(data.next_unlabeled.index), data.next_unlabeled.sample_key);
-    showToast(`Saved ${humanLabel}.`);
-    return;
-  } else if (humanLabel) {
-    state.selectedKey = sampleKey;
-  } else {
-    state.selectedKey = sampleKey;
-  }
-
+  state.selectedKey = sampleKey;
   render();
   showToast(humanLabel ? `Saved ${humanLabel}.` : "Label cleared.");
 }
@@ -402,13 +448,21 @@ async function exportData() {
   }
 }
 
+function findTargetByKey(sampleKey) {
+  for (const group of state.groups) {
+    const item = (group.targets || []).find((candidate) => candidate.sample_key === sampleKey);
+    if (item) return item;
+  }
+  return null;
+}
+
 function onImageMouseDown(event) {
   if (event.button !== 0) return;
   const imageBox = event.target.closest(".image-box");
   const img = imageBox?.querySelector("img");
   if (!imageBox || !img) return;
 
-  const card = event.target.closest(".sample-card");
+  const card = event.target.closest(".target-card");
   if (card) {
     state.selectedKey = card.dataset.key || "";
   }
@@ -431,8 +485,8 @@ function onImageMouseDown(event) {
 function startImageCompare(event, imageBox, img) {
   if (!imageBox.classList.contains("target-image")) return;
 
-  const card = event.target.closest(".sample-card");
-  const item = state.items.find((candidate) => candidate.sample_key === card?.dataset.key);
+  const card = event.target.closest(".target-card");
+  const item = findTargetByKey(card?.dataset.key || "");
   if (!img || !item?.source) return;
 
   img.dataset.targetSrc = img.src;

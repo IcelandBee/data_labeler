@@ -26,7 +26,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -65,6 +66,17 @@ input[readonly] {
   color: var(--muted);
 }
 
+textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: #ffffff;
+  color: var(--ink);
+}
+
 .toolbar {
   position: sticky;
   top: 0;
@@ -100,6 +112,10 @@ input[readonly] {
 .grow,
 .export-dir {
   flex: 1 1 auto;
+}
+
+.target-dirs-field {
+  flex: 1 1 320px;
 }
 
 .export-row {
@@ -181,6 +197,76 @@ input[readonly] {
   border: 2px solid var(--line);
   border-radius: 6px;
   background: var(--panel);
+}
+
+.group-card {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 2px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.group-card.reviewed {
+  border-left-color: var(--pass);
+}
+
+.group-header,
+.target-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.shared-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.target-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.target-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 2px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfe;
+}
+
+.target-card.hovered,
+.target-card:hover {
+  border-color: var(--line-strong);
+}
+
+.target-card.selected {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 2px rgba(40, 104, 199, 0.12);
+}
+
+.target-card.label-pass {
+  border-left-color: var(--pass);
+}
+
+.target-card.label-fail {
+  border-left-color: var(--fail);
+}
+
+.group-warning {
+  padding: 10px;
+  border: 1px dashed #d5af4d;
+  border-radius: 4px;
+  background: var(--warn-bg);
+  color: #795400;
+  font-weight: 700;
 }
 
 .sample-card.hovered,
@@ -399,6 +485,11 @@ input[readonly] {
     grid-template-columns: 1fr;
   }
 
+  .shared-row,
+  .target-grid {
+    grid-template-columns: 1fr;
+  }
+
   .image-box {
     grid-template-rows: auto minmax(220px, 44vh) auto;
   }
@@ -436,6 +527,8 @@ input[readonly] {
   }
 
   .card-header,
+  .group-header,
+  .target-header,
   .actions {
     align-items: stretch;
     flex-wrap: wrap;
