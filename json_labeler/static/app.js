@@ -255,6 +255,10 @@ function imageViewId(sampleKey, role) {
   return `${sampleKey}:${role}`;
 }
 
+function comparisonImageViewId(groupKey) {
+  return `${groupKey}:compare`;
+}
+
 function getImageView(viewId) {
   if (!state.imageViews[viewId]) {
     state.imageViews[viewId] = { scale: 1, x: 0, y: 0 };
@@ -271,19 +275,26 @@ function applyImageViewToElement(viewId, img) {
   img.style.transform = imageTransformStyle(viewId).replace("transform: ", "").replace(";", "");
 }
 
-function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
+function applyImageView(viewId) {
+  els.content.querySelectorAll(`.image-box[data-view-id="${CSS.escape(viewId)}"] img`).forEach((img) => {
+    applyImageViewToElement(viewId, img);
+  });
+}
+
+function imageBlock(title, path, url, error, sampleKey, role, extraClass = "", syncViewId = "") {
   const safeTitle = escapeHtml(title);
   const safePath = escapeHtml(path || "");
-  const viewId = imageViewId(sampleKey, role);
+  const viewId = syncViewId || imageViewId(sampleKey, role);
   const safeViewId = escapeHtml(viewId);
+  const syncAttribute = syncViewId ? ` data-sync-view="${safeViewId}"` : "";
   if (error || !url) {
-    return `<div class="image-box image-missing ${extraClass}" data-view-id="${safeViewId}">
+    return `<div class="image-box image-missing ${extraClass}" data-view-id="${safeViewId}"${syncAttribute}>
       <div class="image-title">${safeTitle}</div>
       <div class="image-error">${escapeHtml(error || "image unavailable")}</div>
       <div class="image-path">${safePath}</div>
     </div>`;
   }
-  return `<figure class="image-box ${extraClass}" data-view-id="${safeViewId}">
+  return `<figure class="image-box ${extraClass}" data-view-id="${safeViewId}"${syncAttribute}>
     <figcaption class="image-title">${safeTitle}</figcaption>
     <div class="image-stage">
       <img src="${escapeHtml(url)}" alt="${safeTitle}" data-source-path="${safePath}" loading="lazy" decoding="async" style="${imageTransformStyle(viewId)}">
@@ -293,8 +304,9 @@ function imageBlock(title, path, url, error, sampleKey, role, extraClass = "") {
 }
 
 function renderSharedImageCard(group, title, path, url, error, role) {
+  const syncViewId = role === "source" ? comparisonImageViewId(group.group_key || "") : "";
   return `<article class="shared-image-card">
-    ${imageBlock(title, path, url, error, group.group_key || "", role)}
+    ${imageBlock(title, path, url, error, group.group_key || "", role, "", syncViewId)}
   </article>`;
 }
 
@@ -313,7 +325,7 @@ function renderTargetCard(group, target) {
       <span class="sample-path" title="${escapeHtml(titlePath)}">${escapeHtml(titlePath || key)}</span>
       <span class="label-pill">${escapeHtml(label || "unlabeled")}</span>
     </header>
-    ${imageBlock("file_name", target.target_path || target.file_name, target.target, target.image_errors?.file_name, key, "target", "target-image")}
+    ${imageBlock("file_name", target.target_path || target.file_name, target.target, target.image_errors?.file_name, key, "target", "target-image", comparisonImageViewId(group.group_key || ""))}
     <footer class="actions">
       <button type="button" data-action="label" data-label="pass" data-key="${escapeHtml(key)}">Pass</button>
       <button type="button" data-action="label" data-label="fail" data-key="${escapeHtml(key)}">Fail</button>
@@ -519,7 +531,7 @@ function onImageMouseMove(event) {
   const view = getImageView(state.activePan.viewId);
   view.x = state.activePan.originX + event.clientX - state.activePan.startX;
   view.y = state.activePan.originY + event.clientY - state.activePan.startY;
-  applyImageViewToElement(state.activePan.viewId, state.activePan.img);
+  applyImageView(state.activePan.viewId);
   event.preventDefault();
 }
 
@@ -543,7 +555,7 @@ function onImageWheel(event) {
   const view = getImageView(viewId);
   const delta = event.deltaY < 0 ? 0.12 : -0.12;
   view.scale = Math.min(6, Math.max(0.4, Number((view.scale + delta).toFixed(2))));
-  applyImageViewToElement(viewId, img);
+  applyImageView(viewId);
   event.preventDefault();
 }
 
@@ -554,7 +566,7 @@ function onImageDoubleClick(event) {
 
   const viewId = imageBox.dataset.viewId || "";
   state.imageViews[viewId] = { scale: 1, x: 0, y: 0 };
-  applyImageViewToElement(viewId, img);
+  applyImageView(viewId);
   event.preventDefault();
 }
 

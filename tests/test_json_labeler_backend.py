@@ -761,6 +761,15 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertIn(".image-grid", style_css)
         self.assertIn("var(--images-per-row)", style_css)
 
+    def test_source_and_targets_share_group_image_view(self):
+        root = Path(__file__).resolve().parents[1]
+        app_js = (root / "json_labeler" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("function comparisonImageViewId", app_js)
+        self.assertIn('comparisonImageViewId(group.group_key || "")', app_js)
+        self.assertIn("applyImageView(viewId)", app_js)
+        self.assertIn("data-sync-view", app_js)
+
 
 if __name__ == "__main__":
     unittest.main()
