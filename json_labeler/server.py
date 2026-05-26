@@ -34,6 +34,7 @@ DEFAULT_PASS_FILENAME = "accepted_pass.json"
 DEFAULT_FAIL_FILENAME = "rejected_fail.json"
 DEFAULT_SESSION_ID = "default"
 MAX_PAGE_SIZE = 200
+PAGE_CACHE_RADIUS = 1
 
 # 全局变量
 server_instance = None
@@ -727,17 +728,10 @@ def build_target_dir_indexes(target_dirs):
     return indexes
 
 
-def expand_records_to_groups(records, target_dirs=None):
-    target_dirs = target_dirs or []
-    valid_dirs, invalid_dirs = _valid_target_dirs(target_dirs)
-    if target_dirs and not valid_dirs:
-        joined = ', '.join(invalid_dirs or target_dirs)
-        raise ValueError(f'No valid target directories: {joined}')
-
-    target_indexes = build_target_dir_indexes(valid_dirs) if valid_dirs else []
+def expand_records_to_groups_from_indexes(records, target_indexes=None, start_index=0):
+    target_indexes = target_indexes or []
     groups = []
-    any_matched_target = False
-    for index, record in enumerate(records):
+    for index, record in enumerate(records, start_index):
         basename = os.path.basename(_record_path_value(record, 'file_name'))
         group_key = make_group_key(record, index)
         shared = normalize_record_for_item(record, index)
@@ -771,7 +765,6 @@ def expand_records_to_groups(records, target_dirs=None):
                     target_item['target_dir_name'] = target_index['name']
                     target_item['record'] = target_record
                     group['targets'].append(target_item)
-                    any_matched_target = True
                 else:
                     group['missing_target_dirs'].append(target_dir)
         else:
@@ -783,11 +776,46 @@ def expand_records_to_groups(records, target_dirs=None):
             target_item['target_dir_name'] = os.path.basename(target_item['target_dir'])
             target_item['record'] = target_record
             group['targets'].append(target_item)
-            any_matched_target = True
 
         groups.append(group)
 
     return groups
+
+
+def expand_records_to_groups(records, target_dirs=None):
+    target_dirs = target_dirs or []
+    valid_dirs, invalid_dirs = _valid_target_dirs(target_dirs)
+    if target_dirs and not valid_dirs:
+        joined = ', '.join(invalid_dirs or target_dirs)
+        raise ValueError(f'No valid target directories: {joined}')
+
+    target_indexes = build_target_dir_indexes(valid_dirs) if valid_dirs else []
+    return expand_records_to_groups_from_indexes(records, target_indexes)
+
+
+def target_records_for_record(record, index, target_indexes=None):
+    target_indexes = target_indexes or []
+    if target_indexes:
+        basename = os.path.basename(_record_path_value(record, 'file_name'))
+        if not basename:
+            return []
+        targets = []
+        for target_index in target_indexes:
+            target_path = target_index['files'].get(basename, '')
+            if target_path:
+                targets.append(expanded_target_record(record, target_path))
+        return targets
+    return [copy.deepcopy(record)]
+
+
+def any_target_matches(records, target_indexes=None):
+    target_indexes = target_indexes or []
+    if not target_indexes:
+        return bool(records)
+    for index, record in enumerate(records):
+        if target_records_for_record(record, index, target_indexes):
+            return True
+    return False
 
 
 def build_items(records, sidecar):
@@ -910,6 +938,37 @@ def page_groups(groups, sidecar, page=1, page_size=20):
     }
 
 
+def materialize_group_page(records, target_indexes, page=1, page_size=20):
+    page, page_size, total_pages, start, end = page_bounds(len(records), page, page_size)
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "groups": expand_records_to_groups_from_indexes(records[start:end], target_indexes, start),
+    }
+
+
+def labels_for_dataset(records, target_indexes, sidecar):
+    labels = {}
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for index, record in enumerate(records):
+        for target_record in target_records_for_record(record, index, target_indexes):
+            sample_key = sample_key_for_record(target_record, index)
+            sidecar_entry = sidecar_labels.get(sample_key)
+            if not isinstance(sidecar_entry, dict):
+                continue
+            human_label = sidecar_entry.get('human_label', '')
+            if human_label not in ALLOWED_LABELS:
+                continue
+            labels[sample_key] = {
+                'human_label': human_label,
+                'updated_at': sidecar_entry.get('updated_at', ''),
+            }
+
+    return labels
+
+
 def compute_stats(records, labels):
     passed = 0
     failed = 0
@@ -949,6 +1008,41 @@ def compute_group_stats(groups, labels, group_progress):
         for target in group.get('targets', []):
             targets_total += 1
             entry = labels.get(target.get('sample_key', ''), {})
+            human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
+            if human_label == 'pass':
+                passed += 1
+            elif human_label == 'fail':
+                failed += 1
+            else:
+                unlabeled += 1
+
+    return {
+        'groups_total': groups_total,
+        'groups_reviewed': groups_reviewed,
+        'groups_unreviewed': groups_total - groups_reviewed,
+        'targets_total': targets_total,
+        'pass': passed,
+        'fail': failed,
+        'unlabeled_as_fail': unlabeled,
+    }
+
+
+def compute_group_stats_for_records(records, target_indexes, labels, group_progress):
+    groups_total = len(records)
+    groups_reviewed = sum(
+        1 for index, record in enumerate(records)
+        if group_progress.get(make_group_key(record, index), {}).get('reviewed') is True
+    )
+    targets_total = 0
+    passed = 0
+    failed = 0
+    unlabeled = 0
+
+    for index, record in enumerate(records):
+        for target_record in target_records_for_record(record, index, target_indexes):
+            targets_total += 1
+            sample_key = sample_key_for_record(target_record, index)
+            entry = labels.get(sample_key, {})
             human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
             if human_label == 'pass':
                 passed += 1
@@ -1029,6 +1123,44 @@ def infer_legacy_group_progress(records, groups, sidecar):
     return progress
 
 
+def infer_group_progress_for_records(records, target_indexes, sidecar):
+    progress = copy.deepcopy(sidecar.get('groups', {}) if isinstance(sidecar, dict) else {})
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for index, record in enumerate(records):
+        group_key = make_group_key(record, index)
+        if not group_key or progress.get(group_key, {}).get('reviewed') is True:
+            continue
+
+        candidate_records = [record] + target_records_for_record(record, index, target_indexes)
+        for candidate in candidate_records:
+            sample_key = sample_key_for_record(candidate, index)
+            entry = sidecar_labels.get(sample_key)
+            if isinstance(entry, dict) and entry.get('human_label') in ('pass', 'fail'):
+                progress[group_key] = {
+                    'reviewed': True,
+                    'updated_at': entry.get('updated_at', ''),
+                }
+                break
+
+    return progress
+
+
+def unreviewed_group_at_records(records, group_progress, start_index=0, wrap=False):
+    total = len(records)
+    if total == 0:
+        return None
+
+    limit = total if wrap else max(0, total - start_index)
+    for offset in range(limit):
+        index = (start_index + offset) % total
+        group_key = make_group_key(records[index], index)
+        entry = group_progress.get(group_key, {})
+        if entry.get('reviewed') is not True:
+            return {"group_key": group_key, "index": index}
+    return None
+
+
 def build_export_payloads(records, labels):
     annotated_all = []
     passed = []
@@ -1101,7 +1233,10 @@ def make_empty_state():
         "sidecar_path": "",
         "records": [],
         "groups": [],
+        "page_cache": {},
+        "cache_page_size": None,
         "target_dirs": [],
+        "target_indexes": [],
         "sidecar": empty_sidecar(""),
     }
 
@@ -1168,6 +1303,42 @@ def find_target_item(groups, sample_key):
     return None
 
 
+def refresh_cached_groups(state):
+    cached = []
+    for page in sorted(state.get("page_cache", {})):
+        cached.extend(state["page_cache"][page].get("groups", []))
+    state["groups"] = cached
+    return cached
+
+
+def ensure_group_page_cache(state, requested_page=1, page_size=20):
+    records = state.get("records", [])
+    target_indexes = state.get("target_indexes", [])
+    page, page_size, total_pages, _, _ = page_bounds(len(records), requested_page, page_size)
+
+    if state.get("cache_page_size") != page_size:
+        state["page_cache"] = {}
+        state["cache_page_size"] = page_size
+
+    wanted_pages = range(
+        max(1, page - PAGE_CACHE_RADIUS),
+        min(total_pages, page + PAGE_CACHE_RADIUS) + 1,
+    )
+    wanted_pages = set(wanted_pages)
+    page_cache = state.setdefault("page_cache", {})
+
+    for cache_page in wanted_pages:
+        if cache_page not in page_cache:
+            page_cache[cache_page] = materialize_group_page(records, target_indexes, cache_page, page_size)
+
+    for cache_page in list(page_cache):
+        if cache_page not in wanted_pages:
+            del page_cache[cache_page]
+
+    refresh_cached_groups(state)
+    return page_cache[page]
+
+
 def unlabeled_at(records, labels, start_index=0, wrap=False):
     total = len(records)
     if total == 0:
@@ -1209,12 +1380,15 @@ def api_load(data):
     records = read_json_records(input_json_path)
     sidecar_path = default_sidecar_path(input_json_path)
     sidecar = load_sidecar(sidecar_path, input_json_path)
-    groups = expand_records_to_groups(records, target_dirs)
-    if target_dirs and not any(group.get('targets') for group in groups):
+    valid_dirs, invalid_dirs = _valid_target_dirs(target_dirs)
+    if target_dirs and not valid_dirs:
+        joined = ', '.join(invalid_dirs or target_dirs)
+        raise ValueError(f'No valid target directories: {joined}')
+    target_indexes = build_target_dir_indexes(valid_dirs) if valid_dirs else []
+    if target_dirs and not any_target_matches(records, target_indexes):
         raise ValueError('No target images matched input JSON basenames in the provided target directories')
-    labels = labels_for_groups(groups, sidecar)
-    inferred_progress = infer_legacy_group_progress(records, groups, sidecar)
-    sidecar['groups'] = compute_group_progress_from_labels(groups, labels, inferred_progress)
+    labels = labels_for_dataset(records, target_indexes, sidecar)
+    sidecar['groups'] = infer_group_progress_for_records(records, target_indexes, sidecar)
     sidecar = save_sidecar(sidecar_path, sidecar)
     group_progress = sidecar.get('groups', {})
 
@@ -1222,8 +1396,11 @@ def api_load(data):
         "input_json_path": input_json_path,
         "sidecar_path": sidecar_path,
         "records": records,
-        "groups": groups,
+        "groups": [],
+        "page_cache": {},
+        "cache_page_size": None,
         "target_dirs": target_dirs,
+        "target_indexes": target_indexes,
         "sidecar": sidecar,
     })
 
@@ -1232,28 +1409,40 @@ def api_load(data):
         "session_id": session_id,
         "labels": labels,
         "group_progress": group_progress,
-        "first_unreviewed_group": unreviewed_group_at(groups, group_progress),
+        "first_unreviewed_group": unreviewed_group_at_records(records, group_progress),
         "progress_path": sidecar_path,
-        "stats": compute_group_stats(groups, labels, group_progress),
+        "stats": compute_group_stats_for_records(records, target_indexes, labels, group_progress),
     }
 
 
 def api_page(data):
     session_id, state = _state_for_request(data)
-    groups = state.get("groups", [])
-    if not groups:
+    records = state.get("records", [])
+    if not records:
         raise ValueError("No dataset loaded")
 
-    page_data = page_groups(
-        groups,
-        state.get("sidecar", {}),
+    page_data = ensure_group_page_cache(
+        state,
         data.get("page", 1) if isinstance(data, dict) else 1,
         data.get("page_size", 20) if isinstance(data, dict) else 20,
     )
+    current = page_data.get("groups", [])
+    sidecar_groups = _current_groups_progress(state)
+    labels = labels_for_groups(current, state.get("sidecar", {}))
     page_data.update({
         "success": True,
         "session_id": session_id,
-        "stats": compute_group_stats(groups, _current_labels(state), _current_groups_progress(state)),
+        "labels": labels,
+        "group_progress": {
+            group.get('group_key', ''): sidecar_groups.get(group.get('group_key', ''), {})
+            for group in current
+        },
+        "stats": compute_group_stats_for_records(
+            records,
+            state.get("target_indexes", []),
+            _current_labels(state),
+            sidecar_groups,
+        ),
     })
     return page_data
 
@@ -1281,14 +1470,19 @@ def api_label(data):
         "group_key": target["group_key"],
         "label": label,
         "group_progress": _current_groups_progress(state),
-        "stats": compute_group_stats(groups, labels, _current_groups_progress(state)),
+        "stats": compute_group_stats_for_records(
+            state.get("records", []),
+            state.get("target_indexes", []),
+            labels,
+            _current_groups_progress(state),
+        ),
     }
 
 
 def api_export(data):
     session_id, state = _state_for_request(data)
-    groups = state.get("groups", [])
-    if not groups:
+    records = state.get("records", [])
+    if not records:
         raise ValueError("No dataset loaded")
 
     export_dir = safe_path(data.get("export_dir") if isinstance(data, dict) else "")
@@ -1300,6 +1494,7 @@ def api_export(data):
         data.get("pass_filename", DEFAULT_PASS_FILENAME),
         data.get("fail_filename", DEFAULT_FAIL_FILENAME),
     )
+    groups = expand_records_to_groups_from_indexes(records, state.get("target_indexes", []))
     annotated, passed, failed = build_export_payloads_from_groups(groups, _current_labels(state))
     paths = {
         "annotated": os.path.normpath(os.path.join(export_dir, annotated_name)),

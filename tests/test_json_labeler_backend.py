@@ -454,7 +454,25 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(server.STATE["input_json_path"], os.path.normpath(str(input_path)))
             self.assertEqual(server.STATE["sidecar_path"], str(sidecar_path))
             self.assertEqual(server.STATE["records"], records)
-            self.assertEqual(server.STATE["groups"][0]["targets"][0]["record"], records[0])
+            self.assertEqual(server.STATE["groups"], [])
+            self.assertEqual(server.STATE["page_cache"], {})
+
+    def test_api_load_does_not_materialize_all_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            records = [make_real_record(tmp, index) for index in range(5)]
+            model = Path(tmp) / "model"
+            for index in range(5):
+                write_fake_image(model / f"{index:05d}.jpg")
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+
+            with mock.patch.object(server, "normalize_record_for_item", wraps=server.normalize_record_for_item) as normalize:
+                result = server.api_load({"input_json_path": str(input_path), "target_dirs": [str(model)]})
+
+            self.assertTrue(result["success"])
+            self.assertEqual(normalize.call_count, 0)
+            self.assertEqual(server.STATE["groups"], [])
+            self.assertEqual(server.STATE["page_cache"], {})
 
     def test_api_page_returns_only_requested_items_after_load(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -472,6 +490,26 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(len(result["groups"]), 1)
             self.assertEqual(result["groups"][0]["prompt"], "Prompt 1")
             self.assertEqual(len(result["groups"][0]["targets"]), 1)
+
+    def test_api_page_caches_only_requested_and_adjacent_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            input_path = Path(tmp) / "input.json"
+            records = [make_record(index) for index in range(5)]
+            input_path.write_text(json.dumps(records), encoding="utf-8")
+            server.api_load({"input_json_path": str(input_path)})
+
+            result = server.api_page({"page": 3, "page_size": 1})
+
+            self.assertTrue(result["success"])
+            self.assertEqual(result["page"], 3)
+            self.assertEqual([group["index"] for group in result["groups"]], [2])
+            self.assertEqual(sorted(server.STATE["page_cache"].keys()), [2, 3, 4])
+            self.assertEqual([group["index"] for group in server.STATE["groups"]], [1, 2, 3])
+
+            server.api_page({"page": 5, "page_size": 1})
+
+            self.assertEqual(sorted(server.STATE["page_cache"].keys()), [4, 5])
+            self.assertEqual([group["index"] for group in server.STATE["groups"]], [3, 4])
 
     def test_api_label_updates_and_writes_sidecar_then_returns_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
