@@ -533,6 +533,7 @@ def empty_sidecar(source_file=""):
         'source_mtime': source_mtime,
         'updated_at': now_iso(),
         'labels': {},
+        'groups': {},
     }
 
 
@@ -578,6 +579,17 @@ def load_sidecar(sidecar_path, source_file=""):
         }
 
     sidecar['labels'] = labels
+    groups = {}
+    for group_key, entry in sidecar.get('groups', {}).items():
+        if not isinstance(group_key, str) or not isinstance(entry, dict):
+            continue
+        if entry.get('reviewed') is True:
+            groups[group_key] = {
+                'reviewed': True,
+                'updated_at': entry.get('updated_at', ''),
+            }
+
+    sidecar['groups'] = groups
     sidecar.setdefault('source_file', source_file)
     sidecar.setdefault('source_mtime', os.path.getmtime(source_file) if source_file and os.path.exists(source_file) else None)
     sidecar.setdefault('updated_at', now_iso())
@@ -813,6 +825,27 @@ def labels_for_records(records, sidecar):
     return labels
 
 
+def labels_for_groups(groups, sidecar):
+    labels = {}
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for group in groups:
+        for target in group.get('targets', []):
+            sample_key = target.get('sample_key', '')
+            sidecar_entry = sidecar_labels.get(sample_key)
+            if not isinstance(sidecar_entry, dict):
+                continue
+            human_label = sidecar_entry.get('human_label', '')
+            if human_label not in ALLOWED_LABELS:
+                continue
+            labels[sample_key] = {
+                'human_label': human_label,
+                'updated_at': sidecar_entry.get('updated_at', ''),
+            }
+
+    return labels
+
+
 def page_bounds(total, page, page_size):
     page_size = max(1, min(MAX_PAGE_SIZE, int(page_size or 20)))
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -831,6 +864,23 @@ def build_page(records, sidecar, page=1, page_size=20):
         "total_pages": total_pages,
         "items": items,
         "labels": labels_for_items(items, sidecar),
+    }
+
+
+def page_groups(groups, sidecar, page=1, page_size=20):
+    page, page_size, total_pages, start, end = page_bounds(len(groups), page, page_size)
+    current = groups[start:end]
+    sidecar_groups = sidecar.get('groups', {}) if isinstance(sidecar, dict) else {}
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "groups": current,
+        "labels": labels_for_groups(current, sidecar),
+        "group_progress": {
+            group.get('group_key', ''): sidecar_groups.get(group.get('group_key', ''), {})
+            for group in current
+        },
     }
 
 
@@ -858,6 +908,40 @@ def compute_stats(records, labels):
     }
 
 
+def compute_group_stats(groups, labels, group_progress):
+    groups_total = len(groups)
+    groups_reviewed = sum(
+        1 for group in groups
+        if group_progress.get(group.get('group_key', ''), {}).get('reviewed') is True
+    )
+    targets_total = 0
+    passed = 0
+    failed = 0
+    unlabeled = 0
+
+    for group in groups:
+        for target in group.get('targets', []):
+            targets_total += 1
+            entry = labels.get(target.get('sample_key', ''), {})
+            human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
+            if human_label == 'pass':
+                passed += 1
+            elif human_label == 'fail':
+                failed += 1
+            else:
+                unlabeled += 1
+
+    return {
+        'groups_total': groups_total,
+        'groups_reviewed': groups_reviewed,
+        'groups_unreviewed': groups_total - groups_reviewed,
+        'targets_total': targets_total,
+        'pass': passed,
+        'fail': failed,
+        'unlabeled_as_fail': unlabeled,
+    }
+
+
 def apply_label(labels, sample_key, human_label, now=None):
     if human_label not in ALLOWED_LABELS:
         raise ValueError(f'Invalid label: {human_label}')
@@ -866,6 +950,57 @@ def apply_label(labels, sample_key, human_label, now=None):
         'updated_at': now or now_iso(),
     }
     return labels[sample_key]
+
+
+def apply_label_to_sidecar(sidecar, sample_key, group_key, human_label, now=None):
+    labels = sidecar.setdefault('labels', {})
+    groups = sidecar.setdefault('groups', {})
+    label = apply_label(labels, sample_key, human_label, now=now)
+    timestamp = label['updated_at']
+    if human_label:
+        groups[group_key] = {'reviewed': True, 'updated_at': timestamp}
+    return label
+
+
+def compute_group_progress_from_labels(groups, labels, existing_progress=None):
+    progress = copy.deepcopy(existing_progress or {})
+    for group in groups:
+        group_key = group.get('group_key', '')
+        if not group_key:
+            continue
+        if progress.get(group_key, {}).get('reviewed') is True:
+            continue
+        for target in group.get('targets', []):
+            entry = labels.get(target.get('sample_key', ''), {})
+            if isinstance(entry, dict) and entry.get('human_label') in ('pass', 'fail'):
+                progress[group_key] = {
+                    'reviewed': True,
+                    'updated_at': entry.get('updated_at', ''),
+                }
+                break
+    return progress
+
+
+def infer_legacy_group_progress(records, groups, sidecar):
+    progress = copy.deepcopy(sidecar.get('groups', {}) if isinstance(sidecar, dict) else {})
+    sidecar_labels = sidecar.get('labels', {}) if isinstance(sidecar, dict) else {}
+
+    for index, record in enumerate(records):
+        if index >= len(groups):
+            break
+        group = groups[index]
+        group_key = group.get('group_key', '')
+        if not group_key or progress.get(group_key, {}).get('reviewed') is True:
+            continue
+        legacy_key = sample_key_for_record(record, index)
+        entry = sidecar_labels.get(legacy_key)
+        if isinstance(entry, dict) and entry.get('human_label') in ('pass', 'fail'):
+            progress[group_key] = {
+                'reviewed': True,
+                'updated_at': entry.get('updated_at', ''),
+            }
+
+    return progress
 
 
 def build_export_payloads(records, labels):
@@ -904,8 +1039,45 @@ def build_export_payloads(records, labels):
     return annotated_all, passed, failed
 
 
+def build_export_payloads_from_groups(groups, labels):
+    annotated_all = []
+    passed = []
+    failed = []
+
+    for group in groups:
+        for target in group.get('targets', []):
+            record = copy.deepcopy(target.get('record', {}))
+            entry = labels.get(target.get('sample_key', ''), {})
+            human_label = entry.get('human_label', '') if isinstance(entry, dict) else ''
+            export_label = human_label if human_label in ('pass', 'fail') else 'fail'
+
+            if isinstance(record, dict):
+                annotated = copy.deepcopy(record)
+                annotated['human_label'] = export_label
+            else:
+                annotated = {
+                    '_invalid_record': copy.deepcopy(record),
+                    'human_label': export_label,
+                }
+
+            annotated_all.append(annotated)
+            if export_label == 'pass':
+                passed.append(copy.deepcopy(record))
+            else:
+                failed.append(copy.deepcopy(record))
+
+    return annotated_all, passed, failed
+
+
 def make_empty_state():
-    return {"input_json_path": "", "sidecar_path": "", "records": [], "sidecar": empty_sidecar("")}
+    return {
+        "input_json_path": "",
+        "sidecar_path": "",
+        "records": [],
+        "groups": [],
+        "target_dirs": [],
+        "sidecar": empty_sidecar(""),
+    }
 
 
 STATE = make_empty_state()
@@ -940,6 +1112,17 @@ def _current_labels(state=None):
     return labels
 
 
+def _current_groups_progress(state=None):
+    if state is None:
+        state = STATE
+    sidecar = state.get("sidecar") if isinstance(state, dict) else {}
+    groups = sidecar.get("groups", {}) if isinstance(sidecar, dict) else {}
+    if not isinstance(groups, dict):
+        groups = {}
+        sidecar["groups"] = groups
+    return groups
+
+
 def _loaded_sample_keys(records):
     return {sample_key_for_record(record, index) for index, record in enumerate(records)}
 
@@ -949,6 +1132,14 @@ def find_sample_index(records, sample_key):
         if sample_key_for_record(record, index) == sample_key:
             return index
     return -1
+
+
+def find_target_item(groups, sample_key):
+    for group in groups:
+        for target in group.get('targets', []):
+            if target.get('sample_key') == sample_key:
+                return target
+    return None
 
 
 def unlabeled_at(records, labels, start_index=0, wrap=False):
@@ -967,21 +1158,46 @@ def unlabeled_at(records, labels, start_index=0, wrap=False):
     return None
 
 
+def unreviewed_group_at(groups, group_progress, start_index=0, wrap=False):
+    total = len(groups)
+    if total == 0:
+        return None
+
+    limit = total if wrap else max(0, total - start_index)
+    for offset in range(limit):
+        index = (start_index + offset) % total
+        group = groups[index]
+        entry = group_progress.get(group.get('group_key', ''), {})
+        if entry.get('reviewed') is not True:
+            return {"group_key": group.get('group_key', ''), "index": index}
+    return None
+
+
 def api_load(data):
     session_id, state = _state_for_request(data)
     input_json_path = safe_path(data.get("input_json_path") if isinstance(data, dict) else "")
     if not input_json_path:
         raise ValueError("input_json_path is required")
 
+    target_dirs = parse_target_dirs(data)
     records = read_json_records(input_json_path)
     sidecar_path = default_sidecar_path(input_json_path)
     sidecar = load_sidecar(sidecar_path, input_json_path)
-    labels = labels_for_records(records, sidecar)
+    groups = expand_records_to_groups(records, target_dirs)
+    if target_dirs and not any(group.get('targets') for group in groups):
+        raise ValueError('No target images matched input JSON basenames in the provided target directories')
+    labels = labels_for_groups(groups, sidecar)
+    inferred_progress = infer_legacy_group_progress(records, groups, sidecar)
+    sidecar['groups'] = compute_group_progress_from_labels(groups, labels, inferred_progress)
+    sidecar = save_sidecar(sidecar_path, sidecar)
+    group_progress = sidecar.get('groups', {})
 
     state.update({
         "input_json_path": input_json_path,
         "sidecar_path": sidecar_path,
         "records": records,
+        "groups": groups,
+        "target_dirs": target_dirs,
         "sidecar": sidecar,
     })
 
@@ -989,20 +1205,21 @@ def api_load(data):
         "success": True,
         "session_id": session_id,
         "labels": labels,
-        "first_unlabeled": unlabeled_at(records, labels),
+        "group_progress": group_progress,
+        "first_unreviewed_group": unreviewed_group_at(groups, group_progress),
         "progress_path": sidecar_path,
-        "stats": compute_stats(records, labels),
+        "stats": compute_group_stats(groups, labels, group_progress),
     }
 
 
 def api_page(data):
     session_id, state = _state_for_request(data)
-    records = state.get("records", [])
-    if not records:
+    groups = state.get("groups", [])
+    if not groups:
         raise ValueError("No dataset loaded")
 
-    page_data = build_page(
-        records,
+    page_data = page_groups(
+        groups,
         state.get("sidecar", {}),
         data.get("page", 1) if isinstance(data, dict) else 1,
         data.get("page_size", 20) if isinstance(data, dict) else 20,
@@ -1010,41 +1227,42 @@ def api_page(data):
     page_data.update({
         "success": True,
         "session_id": session_id,
-        "stats": compute_stats(records, _current_labels(state)),
+        "stats": compute_group_stats(groups, _current_labels(state), _current_groups_progress(state)),
     })
     return page_data
 
 
 def api_label(data):
     session_id, state = _state_for_request(data)
-    records = state.get("records", [])
+    groups = state.get("groups", [])
     sidecar_path = state.get("sidecar_path", "")
-    if not records or not sidecar_path:
+    if not groups or not sidecar_path:
         raise ValueError("No dataset loaded")
 
     sample_key = data.get("sample_key") if isinstance(data, dict) else ""
-    sample_index = find_sample_index(records, sample_key)
-    if sample_index < 0:
+    target = find_target_item(groups, sample_key)
+    if not target:
         raise ValueError("sample_key is not in the loaded dataset")
 
     human_label = data.get("human_label", "") if isinstance(data, dict) else ""
-    label = apply_label(_current_labels(state), sample_key, human_label)
+    label = apply_label_to_sidecar(state["sidecar"], sample_key, target["group_key"], human_label)
     state["sidecar"] = save_sidecar(sidecar_path, state["sidecar"])
     labels = _current_labels(state)
     return {
         "success": True,
         "session_id": session_id,
         "sample_key": sample_key,
+        "group_key": target["group_key"],
         "label": label,
-        "next_unlabeled": unlabeled_at(records, labels, sample_index + 1, wrap=True),
-        "stats": compute_stats(records, labels),
+        "group_progress": _current_groups_progress(state),
+        "stats": compute_group_stats(groups, labels, _current_groups_progress(state)),
     }
 
 
 def api_export(data):
     session_id, state = _state_for_request(data)
-    records = state.get("records", [])
-    if not records:
+    groups = state.get("groups", [])
+    if not groups:
         raise ValueError("No dataset loaded")
 
     export_dir = safe_path(data.get("export_dir") if isinstance(data, dict) else "")
@@ -1056,7 +1274,7 @@ def api_export(data):
         data.get("pass_filename", DEFAULT_PASS_FILENAME),
         data.get("fail_filename", DEFAULT_FAIL_FILENAME),
     )
-    annotated, passed, failed = build_export_payloads(records, _current_labels(state))
+    annotated, passed, failed = build_export_payloads_from_groups(groups, _current_labels(state))
     paths = {
         "annotated": os.path.normpath(os.path.join(export_dir, annotated_name)),
         "pass": os.path.normpath(os.path.join(export_dir, pass_name)),

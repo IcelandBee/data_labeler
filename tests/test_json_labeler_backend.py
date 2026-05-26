@@ -291,6 +291,71 @@ class JsonLabelerBackendTests(unittest.TestCase):
             corrupt_files = list(Path(tmp).glob("input.labels.corrupt-*.json"))
             self.assertEqual(corrupt_files, [])
 
+    def test_sidecar_load_accepts_groups_progress(self):
+        sidecar = {
+            "labels": {"sample": {"human_label": "pass", "updated_at": "t1"}},
+            "groups": {"group": {"reviewed": True, "updated_at": "t2"}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "input.labels.json"
+            path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+            loaded = server.load_sidecar(str(path))
+
+            self.assertEqual(loaded["labels"]["sample"]["human_label"], "pass")
+            self.assertEqual(loaded["groups"]["group"], {"reviewed": True, "updated_at": "t2"})
+
+    def test_apply_label_updates_group_progress(self):
+        sidecar = server.empty_sidecar("")
+        group_key = "group-1"
+        sample_key = "sample-1"
+
+        label = server.apply_label_to_sidecar(sidecar, sample_key, group_key, "pass", now="t1")
+
+        self.assertEqual(label, {"human_label": "pass", "updated_at": "t1"})
+        self.assertEqual(sidecar["groups"][group_key], {"reviewed": True, "updated_at": "t1"})
+
+    def test_compute_group_stats_counts_groups_and_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, 1), make_real_record(tmp, 2)]
+            model_a = Path(tmp) / "model-a"
+            model_b = Path(tmp) / "model-b"
+            for name in ("00001.jpg", "00002.jpg"):
+                write_fake_image(model_a / name)
+                write_fake_image(model_b / name)
+            groups = server.expand_records_to_groups(records, [str(model_a), str(model_b)])
+            first_target = groups[0]["targets"][0]
+            labels = {first_target["sample_key"]: {"human_label": "pass"}}
+            group_progress = {groups[0]["group_key"]: {"reviewed": True}}
+
+            stats = server.compute_group_stats(groups, labels, group_progress)
+
+            self.assertEqual(stats, {
+                "groups_total": 2,
+                "groups_reviewed": 1,
+                "groups_unreviewed": 1,
+                "targets_total": 4,
+                "pass": 1,
+                "fail": 0,
+                "unlabeled_as_fail": 3,
+            })
+
+    def test_unreviewed_group_uses_group_progress_not_each_target_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, 1), make_real_record(tmp, 2)]
+            model_a = Path(tmp) / "model-a"
+            model_b = Path(tmp) / "model-b"
+            for name in ("00001.jpg", "00002.jpg"):
+                write_fake_image(model_a / name)
+                write_fake_image(model_b / name)
+            groups = server.expand_records_to_groups(records, [str(model_a), str(model_b)])
+            group_progress = {groups[0]["group_key"]: {"reviewed": True}}
+
+            result = server.unreviewed_group_at(groups, group_progress)
+
+            self.assertEqual(result["group_key"], groups[1]["group_key"])
+            self.assertEqual(result["index"], 1)
+
     def test_export_payloads_create_three_expected_json_arrays(self):
         records = [make_record(0), make_record(1), make_record(2)]
         labels = {
@@ -316,6 +381,27 @@ class JsonLabelerBackendTests(unittest.TestCase):
         self.assertEqual(passed, ["not a record"])
         self.assertEqual(failed, [])
 
+    def test_export_groups_treats_unlabeled_targets_as_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, 8)]
+            model_a = Path(tmp) / "model-a"
+            model_b = Path(tmp) / "model-b"
+            write_fake_image(model_a / "00008.jpg")
+            write_fake_image(model_b / "00008.jpg")
+            groups = server.expand_records_to_groups(records, [str(model_a), str(model_b)])
+            pass_key = groups[0]["targets"][0]["sample_key"]
+            labels = {pass_key: {"human_label": "pass"}}
+
+            annotated, passed, failed = server.build_export_payloads_from_groups(groups, labels)
+
+            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail"])
+            self.assertEqual(len(passed), 1)
+            self.assertEqual(len(failed), 1)
+            self.assertNotIn("human_label", passed[0])
+            self.assertNotIn("human_label", failed[0])
+            self.assertEqual(Path(passed[0]["file_name"]).parent.name, "model-a")
+            self.assertEqual(Path(failed[0]["file_name"]).parent.name, "model-b")
+
     def test_api_load_reads_json_initializes_state_and_resumes_sidecar(self):
         with tempfile.TemporaryDirectory() as tmp:
             input_path = Path(tmp) / "input.json"
@@ -336,18 +422,21 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertTrue(result["success"])
             self.assertEqual(result["progress_path"], str(sidecar_path))
             self.assertNotIn("items", result)
-            self.assertEqual(result["labels"][key]["human_label"], "fail")
-            self.assertEqual(result["first_unlabeled"]["sample_key"], server.make_sample_key(records[0]))
+            self.assertIn("group_progress", result)
+            self.assertEqual(result["first_unreviewed_group"]["index"], 0)
             self.assertEqual(result["stats"], {
-                "total": 2,
+                "groups_total": 2,
+                "groups_reviewed": 1,
+                "groups_unreviewed": 1,
+                "targets_total": 2,
                 "pass": 0,
                 "fail": 1,
-                "labeled": 1,
-                "unlabeled": 1,
+                "unlabeled_as_fail": 1,
             })
             self.assertEqual(server.STATE["input_json_path"], os.path.normpath(str(input_path)))
             self.assertEqual(server.STATE["sidecar_path"], str(sidecar_path))
             self.assertEqual(server.STATE["records"], records)
+            self.assertEqual(server.STATE["groups"][0]["targets"][0]["record"], records[0])
 
     def test_api_page_returns_only_requested_items_after_load(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,8 +451,9 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual(result["page"], 2)
             self.assertEqual(result["page_size"], 1)
             self.assertEqual(result["total_pages"], 3)
-            self.assertEqual(len(result["items"]), 1)
-            self.assertEqual(result["items"][0]["prompt"], "Prompt 1")
+            self.assertEqual(len(result["groups"]), 1)
+            self.assertEqual(result["groups"][0]["prompt"], "Prompt 1")
+            self.assertEqual(len(result["groups"][0]["targets"]), 1)
 
     def test_api_label_updates_and_writes_sidecar_then_returns_stats(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,17 +462,18 @@ class JsonLabelerBackendTests(unittest.TestCase):
             input_path.write_text(json.dumps(records), encoding="utf-8")
             load_result = server.api_load({"input_json_path": str(input_path)})
             page_result = server.api_page({"page": 1, "page_size": 20})
-            sample_key = page_result["items"][0]["sample_key"]
+            sample_key = page_result["groups"][0]["targets"][0]["sample_key"]
 
             result = server.api_label({"sample_key": sample_key, "human_label": "pass"})
 
             self.assertTrue(result["success"])
             self.assertEqual(result["label"]["human_label"], "pass")
-            self.assertEqual(result["next_unlabeled"]["sample_key"], page_result["items"][1]["sample_key"])
+            self.assertNotIn("next_unlabeled", result)
             self.assertEqual(result["stats"]["pass"], 1)
-            self.assertEqual(result["stats"]["unlabeled"], 1)
+            self.assertEqual(result["stats"]["groups_reviewed"], 1)
             saved = json.loads(Path(load_result["progress_path"]).read_text(encoding="utf-8"))
             self.assertEqual(saved["labels"][sample_key]["human_label"], "pass")
+            self.assertTrue(saved["groups"][result["group_key"]]["reviewed"])
 
     def test_api_export_writes_sanitized_custom_files_and_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -392,8 +483,8 @@ class JsonLabelerBackendTests(unittest.TestCase):
             input_path.write_text(json.dumps(records), encoding="utf-8")
             server.api_load({"input_json_path": str(input_path)})
             page_result = server.api_page({"page": 1, "page_size": 20})
-            server.api_label({"sample_key": page_result["items"][0]["sample_key"], "human_label": "pass"})
-            server.api_label({"sample_key": page_result["items"][1]["sample_key"], "human_label": "fail"})
+            server.api_label({"sample_key": page_result["groups"][0]["targets"][0]["sample_key"], "human_label": "pass"})
+            server.api_label({"sample_key": page_result["groups"][1]["targets"][0]["sample_key"], "human_label": "fail"})
 
             result = server.api_export({
                 "export_dir": str(export_dir),
@@ -403,7 +494,7 @@ class JsonLabelerBackendTests(unittest.TestCase):
             })
 
             self.assertTrue(result["success"])
-            self.assertEqual(result["counts"], {"annotated": 2, "pass": 1, "fail": 1})
+            self.assertEqual(result["counts"], {"annotated": 3, "pass": 1, "fail": 2})
             self.assertEqual(set(Path(path).name for path in result["paths"].values()), {
                 "annotated_all.json",
                 "kept.json",
@@ -412,9 +503,9 @@ class JsonLabelerBackendTests(unittest.TestCase):
             annotated = json.loads((export_dir / "annotated_all.json").read_text(encoding="utf-8"))
             passed = json.loads((export_dir / "kept.json").read_text(encoding="utf-8"))
             failed = json.loads((export_dir / "bad_ones.json").read_text(encoding="utf-8"))
-            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail"])
+            self.assertEqual([item["human_label"] for item in annotated], ["pass", "fail", "fail"])
             self.assertEqual([item["prompt"] for item in passed], ["Prompt 0"])
-            self.assertEqual([item["prompt"] for item in failed], ["Prompt 1"])
+            self.assertEqual([item["prompt"] for item in failed], ["Prompt 1", "Prompt 2"])
 
     def test_api_sessions_keep_different_loaded_datasets_isolated(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -434,12 +525,12 @@ class JsonLabelerBackendTests(unittest.TestCase):
 
             server.api_label({
                 "session_id": "alice",
-                "sample_key": page_a["items"][0]["sample_key"],
+                "sample_key": page_a["groups"][0]["targets"][0]["sample_key"],
                 "human_label": "pass",
             })
             server.api_label({
                 "session_id": "bob",
-                "sample_key": page_b["items"][0]["sample_key"],
+                "sample_key": page_b["groups"][0]["targets"][0]["sample_key"],
                 "human_label": "fail",
             })
 
