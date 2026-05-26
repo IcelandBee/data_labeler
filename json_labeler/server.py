@@ -289,6 +289,37 @@ def safe_path(path_str):
     return normalized
 
 
+def parse_target_dirs(data):
+    if not isinstance(data, dict):
+        return []
+
+    raw_values = []
+    list_value = data.get("target_dirs", [])
+    if isinstance(list_value, list):
+        raw_values.extend(list_value)
+    elif isinstance(list_value, str):
+        raw_values.append(list_value)
+
+    text_value = data.get("target_dirs_text", "")
+    if isinstance(text_value, str) and text_value.strip():
+        raw_values.extend(text_value.replace(";", "\n").replace(",", "\n").splitlines())
+
+    parsed = []
+    seen = set()
+    for value in raw_values:
+        if isinstance(value, str):
+            value = value.strip()
+        path = safe_path(value)
+        if not path:
+            continue
+        folded = os.path.normcase(path)
+        if folded in seen:
+            continue
+        seen.add(folded)
+        parsed.append(path)
+    return parsed
+
+
 def now_iso():
     return datetime.datetime.now().astimezone().isoformat(timespec='seconds')
 
@@ -346,6 +377,32 @@ def sample_key_for_record(record, index=None):
     raw_hash = hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()
     index_part = 'unknown' if index is None else str(index)
     return f'invalid:{index_part}:{raw_hash}'
+
+
+def make_group_key(record, index=None):
+    basename = os.path.basename(_record_path_value(record, 'file_name'))
+    parts = [
+        basename,
+        _record_path_value(record, 'cond_1'),
+        _record_path_value(record, 'cond_2'),
+        _record_path_value(record, 'prompt'),
+    ]
+    if any(parts):
+        return hashlib.sha1('\n'.join(parts).encode('utf-8')).hexdigest()
+
+    raw = repr(record)
+    raw_hash = hashlib.sha1(raw.encode('utf-8', errors='replace')).hexdigest()
+    index_part = 'unknown' if index is None else str(index)
+    return f'invalid-group:{index_part}:{raw_hash}'
+
+
+def expanded_target_record(record, target_path):
+    if isinstance(record, dict):
+        expanded = copy.deepcopy(record)
+    else:
+        expanded = {'_invalid_record': copy.deepcopy(record)}
+    expanded['file_name'] = target_path
+    return expanded
 
 
 def default_sidecar_path(input_json_path):
@@ -620,6 +677,79 @@ def normalize_record_for_item(record, index):
         item['image_errors']['record'] = f'Record at index {index} is not an object'
 
     return item
+
+
+def _valid_target_dirs(target_dirs):
+    valid = []
+    invalid = []
+    for target_dir in target_dirs:
+        path = safe_path(target_dir)
+        if path and os.path.isdir(path):
+            valid.append(path)
+        elif path:
+            invalid.append(path)
+    return valid, invalid
+
+
+def expand_records_to_groups(records, target_dirs=None):
+    target_dirs = target_dirs or []
+    valid_dirs, invalid_dirs = _valid_target_dirs(target_dirs)
+    if target_dirs and not valid_dirs:
+        joined = ', '.join(invalid_dirs or target_dirs)
+        raise ValueError(f'No valid target directories: {joined}')
+
+    groups = []
+    any_matched_target = False
+    for index, record in enumerate(records):
+        basename = os.path.basename(_record_path_value(record, 'file_name'))
+        group_key = make_group_key(record, index)
+        shared = normalize_record_for_item(record, index)
+        group = {
+            'index': index,
+            'group_key': group_key,
+            'basename': basename,
+            'prompt': record.get('prompt', '') if isinstance(record, dict) else '',
+            'source_path': shared.get('source_path', ''),
+            'reference_path': shared.get('reference_path', ''),
+            'source': shared.get('source'),
+            'reference': shared.get('reference'),
+            'image_errors': {
+                key: value for key, value in shared.get('image_errors', {}).items()
+                if key in ('cond_1', 'cond_2', 'record')
+            },
+            'missing_target_dirs': [],
+            'targets': [],
+        }
+
+        if valid_dirs:
+            for target_dir in valid_dirs:
+                target_path = os.path.normpath(os.path.join(target_dir, basename)) if basename else ''
+                if target_path and is_valid_image_file(target_path):
+                    target_record = expanded_target_record(record, target_path)
+                    target_item = normalize_record_for_item(target_record, index)
+                    target_item['group_key'] = group_key
+                    target_item['target_index'] = len(group['targets'])
+                    target_item['target_dir'] = target_dir
+                    target_item['target_dir_name'] = os.path.basename(target_dir)
+                    target_item['record'] = target_record
+                    group['targets'].append(target_item)
+                    any_matched_target = True
+                else:
+                    group['missing_target_dirs'].append(target_dir)
+        else:
+            target_record = copy.deepcopy(record)
+            target_item = normalize_record_for_item(target_record, index)
+            target_item['group_key'] = group_key
+            target_item['target_index'] = 0
+            target_item['target_dir'] = os.path.dirname(_record_path_value(record, 'file_name'))
+            target_item['target_dir_name'] = os.path.basename(target_item['target_dir'])
+            target_item['record'] = target_record
+            group['targets'].append(target_item)
+            any_matched_target = True
+
+        groups.append(group)
+
+    return groups
 
 
 def build_items(records, sidecar):

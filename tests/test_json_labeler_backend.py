@@ -23,6 +23,27 @@ def make_record(index=0, label_suffix=""):
     }
 
 
+def write_fake_image(path):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_bytes(b"fake image bytes")
+
+
+def make_real_record(tmp, index=0):
+    source = Path(tmp) / "source" / f"{index:05d}.jpg"
+    reference = Path(tmp) / "reference" / f"{index:05d}.jpg"
+    target = Path(tmp) / "original-target" / f"{index:05d}.jpg"
+    for path in (source, reference, target):
+        write_fake_image(path)
+    return {
+        "file_name": str(target),
+        "cond_1": str(source),
+        "cond_2": str(reference),
+        "prompt": f"Prompt {index}",
+        "width": 1024,
+        "height": 768,
+    }
+
+
 class JsonLabelerBackendTests(unittest.TestCase):
     def setUp(self):
         server.STATE = {
@@ -84,6 +105,70 @@ class JsonLabelerBackendTests(unittest.TestCase):
     def test_validate_export_filenames_rejects_duplicates_after_sanitizing(self):
         with self.assertRaises(ValueError):
             server.validate_export_filenames("same", "same.json", "other.json")
+
+    def test_parse_target_dirs_accepts_list_and_text(self):
+        parsed = server.parse_target_dirs({
+            "target_dirs": [" /a/model ", "", "/b/model"],
+            "target_dirs_text": "/c/model\n/d/model;/e/model,/f/model",
+        })
+
+        self.assertEqual(parsed, [
+            os.path.normpath("/a/model"),
+            os.path.normpath("/b/model"),
+            os.path.normpath("/c/model"),
+            os.path.normpath("/d/model"),
+            os.path.normpath("/e/model"),
+            os.path.normpath("/f/model"),
+        ])
+
+    def test_parse_target_dirs_dedupes_preserving_order(self):
+        parsed = server.parse_target_dirs({
+            "target_dirs": ["/a", "/b", "/a"],
+            "target_dirs_text": "/b\n/c",
+        })
+
+        self.assertEqual(parsed, [os.path.normpath("/a"), os.path.normpath("/b"), os.path.normpath("/c")])
+
+    def test_expand_records_without_target_dirs_preserves_flat_records(self):
+        records = [make_record(0), make_record(1)]
+
+        groups = server.expand_records_to_groups(records, [])
+
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0]["index"], 0)
+        self.assertEqual(groups[0]["basename"], "0.jpg")
+        self.assertEqual(len(groups[0]["targets"]), 1)
+        self.assertEqual(groups[0]["targets"][0]["file_name"], records[0]["file_name"])
+        self.assertEqual(groups[0]["targets"][0]["record"], records[0])
+
+    def test_expand_records_with_target_dirs_matches_by_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, 8)]
+            model_a = Path(tmp) / "model-a"
+            model_b = Path(tmp) / "model-b"
+            write_fake_image(model_a / "00008.jpg")
+            write_fake_image(model_b / "00008.jpg")
+
+            groups = server.expand_records_to_groups(records, [str(model_a), str(model_b)])
+
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0]["basename"], "00008.jpg")
+            self.assertEqual(groups[0]["missing_target_dirs"], [])
+            self.assertEqual([Path(t["file_name"]).parent.name for t in groups[0]["targets"]], ["model-a", "model-b"])
+            self.assertEqual([t["target_dir_name"] for t in groups[0]["targets"]], ["model-a", "model-b"])
+            self.assertEqual([t["record"]["prompt"] for t in groups[0]["targets"]], ["Prompt 8", "Prompt 8"])
+
+    def test_expand_records_keeps_warning_group_when_no_target_matches_one_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, 8)]
+            model_a = Path(tmp) / "model-a"
+            model_a.mkdir()
+
+            groups = server.expand_records_to_groups(records, [str(model_a)])
+
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0]["targets"], [])
+            self.assertEqual(groups[0]["missing_target_dirs"], [str(model_a)])
 
     def test_build_items_preserves_records_and_adds_labels(self):
         records = [make_record(0), make_record(1)]
