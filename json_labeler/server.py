@@ -703,6 +703,30 @@ def _valid_target_dirs(target_dirs):
     return valid, invalid
 
 
+def build_target_dir_indexes(target_dirs):
+    indexes = []
+    for target_dir in target_dirs:
+        files = {}
+        try:
+            with os.scandir(target_dir) as entries:
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    filename = entry.name
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in SUPPORTED_EXTENSIONS:
+                        files[filename] = os.path.normpath(entry.path)
+        except OSError:
+            files = {}
+
+        indexes.append({
+            'path': target_dir,
+            'name': os.path.basename(target_dir),
+            'files': files,
+        })
+    return indexes
+
+
 def expand_records_to_groups(records, target_dirs=None):
     target_dirs = target_dirs or []
     valid_dirs, invalid_dirs = _valid_target_dirs(target_dirs)
@@ -710,6 +734,7 @@ def expand_records_to_groups(records, target_dirs=None):
         joined = ', '.join(invalid_dirs or target_dirs)
         raise ValueError(f'No valid target directories: {joined}')
 
+    target_indexes = build_target_dir_indexes(valid_dirs) if valid_dirs else []
     groups = []
     any_matched_target = False
     for index, record in enumerate(records):
@@ -733,16 +758,17 @@ def expand_records_to_groups(records, target_dirs=None):
             'targets': [],
         }
 
-        if valid_dirs:
-            for target_dir in valid_dirs:
-                target_path = os.path.normpath(os.path.join(target_dir, basename)) if basename else ''
-                if target_path and is_valid_image_file(target_path):
+        if target_indexes:
+            for target_index in target_indexes:
+                target_dir = target_index['path']
+                target_path = target_index['files'].get(basename, '') if basename else ''
+                if target_path:
                     target_record = expanded_target_record(record, target_path)
                     target_item = normalize_record_for_item(target_record, index)
                     target_item['group_key'] = group_key
                     target_item['target_index'] = len(group['targets'])
                     target_item['target_dir'] = target_dir
-                    target_item['target_dir_name'] = os.path.basename(target_dir)
+                    target_item['target_dir_name'] = target_index['name']
                     target_item['record'] = target_record
                     group['targets'].append(target_item)
                     any_matched_target = True

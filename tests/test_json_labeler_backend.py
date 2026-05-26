@@ -158,6 +158,24 @@ class JsonLabelerBackendTests(unittest.TestCase):
             self.assertEqual([t["target_dir_name"] for t in groups[0]["targets"]], ["model-a", "model-b"])
             self.assertEqual([t["record"]["prompt"] for t in groups[0]["targets"]], ["Prompt 8", "Prompt 8"])
 
+    def test_expand_records_indexes_each_target_directory_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            records = [make_real_record(tmp, index) for index in (1, 2, 3)]
+            model_a = Path(tmp) / "model-a"
+            model_b = Path(tmp) / "model-b"
+            for name in ("00001.jpg", "00002.jpg", "00003.jpg"):
+                write_fake_image(model_a / name)
+                write_fake_image(model_b / name)
+
+            with mock.patch("os.scandir", wraps=os.scandir) as scandir:
+                groups = server.expand_records_to_groups(records, [str(model_a), str(model_b)])
+
+            self.assertEqual([len(group["targets"]) for group in groups], [2, 2, 2])
+            self.assertEqual(
+                [os.path.normpath(call.args[0]) for call in scandir.call_args_list],
+                [os.path.normpath(str(model_a)), os.path.normpath(str(model_b))],
+            )
+
     def test_expand_records_keeps_warning_group_when_no_target_matches_one_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             records = [make_real_record(tmp, 8)]
